@@ -1,6 +1,6 @@
-node_modules/
-target/
+.DS_Store
 .pocket-build/
 dist/
-.DS_Store
+node_modules/
+target/
 web/vendor/three/

@@ -1,0 +1,14 @@
+{
+  "name": "pocket-newyork",
+  "private": true,
+  "license": "MIT",
+  "type": "module",
+  "scripts": {
+    "newyork": "bun tools/newyork.ts"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.4.2",
+    "playwright-core": "^1.63.0",
+    "typescript": "^5.9.3"
+  }
+}

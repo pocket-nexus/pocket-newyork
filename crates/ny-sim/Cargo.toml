@@ -1,0 +1,15 @@
+[package]
+name = "ny-sim"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "What moves in Pocket New York, the same on every device: the four ways through the city, the cameras, the traffic, the hours"
+
+[features]
+default = ["std"]
+# Without `std` the crate needs only `core`, `alloc` and `libm`.
+std = ["ny-pack/std"]
+
+[dependencies]
+libm = "0.2"
+ny-pack = { path = "../ny-pack", default-features = false }

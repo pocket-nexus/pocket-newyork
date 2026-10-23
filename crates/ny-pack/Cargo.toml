@@ -1,0 +1,13 @@
+[package]
+name = "ny-pack"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "The device pack of Pocket New York: container, cell and batch tables and vertex layouts shared by the compiler and the runtimes"
+
+[features]
+default = ["std"]
+# Without `std` the crate needs only `core` and `alloc`.
+std = []
+
+[dependencies]

@@ -1,0 +1,26 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Pocket New York · pack viewer</title>
+  <link rel="icon" href="data:," />
+  <script type="importmap">
+    {
+      "imports": {
+        "three": "https://cdn.jsdelivr.net/gh/mrdoob/three.js@dev/build/three.webgpu.js",
+        "three/webgpu": "https://cdn.jsdelivr.net/gh/mrdoob/three.js@dev/build/three.webgpu.js",
+        "three/tsl": "https://cdn.jsdelivr.net/gh/mrdoob/three.js@dev/build/three.tsl.js",
+        "three/addons/": "https://cdn.jsdelivr.net/gh/mrdoob/three.js@dev/examples/jsm/"
+      }
+    }
+  </script>
+  <style>
+    html, body { margin: 0; height: 100%; background: #000; overflow: hidden; }
+    #info { position: fixed; left: 8px; top: 8px; color: #fff; font: 12px/1.4 ui-monospace, monospace; text-shadow: 0 1px 2px #000; white-space: pre; }
+  </style>
+</head>
+<body>
+  <div id="info"></div>
+  <script type="module" src="./view.js"></script>
+</body>
+</html>

@@ -1,0 +1,14 @@
+[workspace]
+resolver = "2"
+members = ["crates/ny-pack", "crates/ny-sim", "crates/ny-cook"]
+# The device apps build with their own toolchains and lockfiles.
+exclude = ["vita", "vendor", "web"]
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 16
+panic = "abort"
+
+[profile.dev]
+opt-level = 2
