@@ -145,7 +145,92 @@ export async function bakeFacades(app) {
   return records;
 }
 
+/**
+ * Ground: a ground material (the sidewalk's flags, the roadway's asphalt and manholes, park paving, lawn) drawn from
+ * straight above over a square whose side its pattern repeats in (the flags' 1.5 m, the manholes' 14 m cells),
+ * by its own colour graph. What the pattern does not repeat (the noise of stains and wear) is folded across the
+ * square's edges, so that the picture repeats without a seam.
+ */
+const GROUND = {
+  createSidewalkMaterial: { metres: 12, size: 512, y: 0.22 },
+  createRoadSurfaceMaterial: { metres: 28, size: 512, y: 0.0 },
+  createParkPavingMaterial: { metres: 7.2, size: 256, y: 0.22 },
+  createParkLawnMaterial: { metres: 16, size: 256, y: 0.25 }
+};
+
+export async function bakeGround(app) {
+  const { renderer, scene: city, lighting } = app;
+  const mats = new Map();
+  city.traverse((o) => {
+    for (const m of Array.isArray(o.material) ? o.material : o.material ? [o.material] : []) {
+      const f = m.userData.pocket?.factory;
+      if (f && GROUND[f] && !mats.has(f)) mats.set(f, m);
+    }
+  });
+  const records = [];
+  lighting.applyPreset('midday', true);
+  for (const [factory, m] of mats) {
+    const g = GROUND[factory];
+    // A margin of a quarter of the square, folded back over its far edges.
+    const M = g.metres / 4;
+    const S = g.size;
+    const MS = Math.round((S * M) / g.metres);
+    const full = S + MS;
+    const x0 = 0, z0 = 380;
+    const plane = new THREE.PlaneGeometry(g.metres + M, g.metres + M);
+    plane.rotateX(-Math.PI / 2);
+    plane.translate(x0 + (g.metres + M) / 2, g.y, z0 + (g.metres + M) / 2);
+    const bm = new THREE.MeshBasicNodeMaterial();
+    bm.fog = false;
+    bm.colorNode = m.colorNode;
+    const mesh = new THREE.Mesh(plane, bm);
+    const scene = new THREE.Scene();
+    scene.add(mesh);
+    // From straight above, close enough that the material draws its finest detail.
+    const cam = new THREE.OrthographicCamera(0, g.metres + M, 0, -(g.metres + M), 0.5, 50);
+    cam.position.set(x0, g.y + 6, z0);
+    cam.up.set(0, 0, -1);
+    cam.lookAt(x0, g.y, z0);
+    cam.updateMatrixWorld();
+    const target = new THREE.RenderTarget(full * SS, full * SS, { type: THREE.FloatType, depthBuffer: true });
+    renderer.setRenderTarget(target);
+    renderer.setClearColor(0x000000, 1);
+    renderer.clear();
+    renderer.render(scene, cam);
+    renderer.setRenderTarget(null);
+    const px = await renderer.readRenderTargetPixelsAsync(target, 0, 0, full * SS, full * SS);
+    target.dispose();
+    const big = downsample(px, full, full, 1);
+    // Fold: the margin past the square fades over its start, along x then along z.
+    const out = new Uint8ClampedArray(S * S * 4);
+    const at = (x, y) => (y * full + x) * 4;
+    const lerp = (a, b, t) => a + (b - a) * t;
+    const row = new Float32Array(full * S * 4);
+    for (let y = 0; y < full; y++) for (let x = 0; x < S; x++) for (let c = 0; c < 4; c++) {
+      let v = big[at(x, y) + c];
+      if (x < MS) v = lerp(big[at(x + S, y) + c], v, x / MS);
+      if (y < S) row[(y * S + x) * 4 + c] = v;
+      else row[(y * S + x) * 4 + c] = v;
+    }
+    const rowAt = (x, y) => (y * S + x) * 4;
+    for (let y = 0; y < S; y++) for (let x = 0; x < S; x++) for (let c = 0; c < 4; c++) {
+      let v = row[rowAt(x, y) + c];
+      if (y < MS) v = lerp(row[rowAt(x, y + S) + c], v, y / MS);
+      out[(y * S + x) * 4 + c] = c === 3 ? 255 : Math.round(v);
+    }
+    const name = `ground_${factory.replace(/^create|Material$/g, '').toLowerCase()}`;
+    await put(`bake/${name}.png`, await png(out, S, S));
+    records.push({ factory, args: m.userData.pocket.args, file: `bake/${name}.png`, metres: g.metres });
+    bm.dispose();
+    plane.dispose();
+  }
+  lighting.applyPreset('golden', true);
+  log(`bake: ${records.length} ground pictures`);
+  return records;
+}
+
 export async function bake(app) {
   const facades = await bakeFacades(app);
-  await put('bake.json', JSON.stringify({ facades }, null, 1));
+  const ground = await bakeGround(app);
+  await put('bake.json', JSON.stringify({ facades, ground }, null, 1));
 }

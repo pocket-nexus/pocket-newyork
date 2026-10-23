@@ -24,6 +24,8 @@ const WALL_F: &str = include_str!("../shaders/wall_f.cg");
 const SOLID_V: &str = include_str!("../shaders/solid_v.cg");
 const SOLID_F: &str = include_str!("../shaders/solid_f.cg");
 const INST_V: &str = include_str!("../shaders/inst_v.cg");
+const GROUND_V: &str = include_str!("../shaders/ground_v.cg");
+const GROUND_F: &str = include_str!("../shaders/ground_f.cg");
 
 /// Light reaches the fragments as a colour, which holds 0..1: it is carried divided by this.
 pub const LIGHT_SCALE: f32 = 2.0;
@@ -102,6 +104,7 @@ impl PackFile {
 struct Pass {
     prog: Program,
     mvp: Param,
+    tile: Param,
     vp: Param,
     bx: Param,
     frame: Param,
@@ -113,7 +116,7 @@ struct Pass {
 impl Pass {
     unsafe fn new(prog: Program, pictures: [&str; 2]) -> Pass {
         let units = pictures.map(|name| if name.is_empty() { 0 } else { prog.fs.sampler_index(name).unwrap_or(0) });
-        Pass { mvp: prog.vs.param("uMvp"), vp: prog.vs.param("uVp"), bx: prog.vs.param("uBox"), frame: prog.vs.param("uFrame"), look: prog.fs.param("uLook"), units, shadow: prog.fs.sampler_index("uShadow"), prog }
+        Pass { mvp: prog.vs.param("uMvp"), tile: prog.vs.param("uTile"), vp: prog.vs.param("uVp"), bx: prog.vs.param("uBox"), frame: prog.vs.param("uFrame"), look: prog.fs.param("uLook"), units, shadow: prog.fs.sampler_index("uShadow"), prog }
     }
 
     /// Binds the program and the shadow window.
@@ -171,6 +174,7 @@ pub struct CityGpu {
     open: Pass,
     inst: Pass,
     inst_open: Pass,
+    ground: Pass,
     items: Vec<Item>,
     wanted: Vec<(u32, f32)>,
     pub models: Vec<Model>,
@@ -197,6 +201,7 @@ const SHADOW_OUT: f32 = 2.5;
 
 const WALL_ATTRS: [(&str, u16, u32, u8); 5] = [("aPosition", 0, U16N, 3), ("aNormal", 6, S8N, 3), ("aAo", 9, U8N, 1), ("aUv", 10, S16N, 2), ("aTint", 14, U8N, 4)];
 const SOLID_ATTRS: [(&str, u16, u32, u8); 5] = [("aPosition", 0, U16N, 3), ("aNormal", 6, S8N, 3), ("aAo", 9, U8N, 1), ("aColor", 10, U8N, 4), ("aGlow", 14, U8N, 4)];
+const GROUND_ATTRS: [(&str, u16, u32, u8); 4] = [("aPosition", 0, U16N, 3), ("aNormal", 6, S8N, 3), ("aAo", 9, U8N, 1), ("aTint", 10, U8N, 4)];
 const INST_ATTRS: [(&str, u16, u32, u8); 4] = [("aRow0", 0, F32, 4), ("aRow1", 16, F32, 4), ("aRow2", 32, F32, 4), ("aTint", 48, U8N, 4)];
 
 impl CityGpu {
@@ -225,6 +230,7 @@ impl CityGpu {
         let open = Pass::new(gpu.program("open", &format!("{defines}#define OPEN\n"), SOLID_V, SOLID_F, &solid_stream, msaa, opaque)?, ["", ""]);
         let inst = Pass::new(gpu.program("inst", &defines, INST_V, SOLID_F, &inst_streams, msaa, opaque)?, ["", ""]);
         let inst_open = Pass::new(gpu.program("inst_open", &format!("{defines}#define OPEN\n"), INST_V, SOLID_F, &inst_streams, msaa, opaque)?, ["", ""]);
+        let ground = Pass::new(gpu.program("ground", &defines, GROUND_V, GROUND_F, &[Stream { stride: 16, instanced: false, attrs: &GROUND_ATTRS }], msaa, opaque)?, ["uGround", ""]);
 
         progress("Reading the city's geometry");
         let tags = [pack::VSOL, pack::VWAL, pack::VGND, pack::IDX0, pack::INST];
@@ -294,6 +300,7 @@ impl CityGpu {
             open,
             inst,
             inst_open,
+            ground,
             items: Vec::with_capacity(4096),
             wanted: Vec::with_capacity(256),
             models,
@@ -338,18 +345,19 @@ impl CityGpu {
                 kind::WALL => show.walls,
                 kind::SOLID | kind::OPEN => show.solids,
                 kind::SOLID_INST | kind::OPEN_INST => show.instances,
+                kind::GROUND => show.solids,
                 _ => false,
             };
             if !on {
                 continue;
             }
             // The streams this item reads: the pack's own, or its cell's record.
-            let (solids, walls, indices, instances) = if it.cell == RESIDENT {
-                (self.own.solids, self.own.walls, self.own.indices, self.own.instances)
+            let (solids, walls, grounds, indices, instances) = if it.cell == RESIDENT {
+                (self.own.solids, self.own.walls, self.own.grounds, self.own.indices, self.own.instances)
             } else {
                 let Some(base) = self.near.ready(it.cell) else { continue };
                 let s = self.near_cells[it.cell as usize].starts();
-                (base.add(s[0]), base.add(s[1]), base.add(s[3]).cast::<u16>(), base.add(s[4]))
+                (base.add(s[0]), base.add(s[1]), base.add(s[2]), base.add(s[3]).cast::<u16>(), base.add(s[4]))
             };
             let pass = match b.kind {
                 kind::WALL => {
@@ -362,12 +370,19 @@ impl CityGpu {
                 kind::SOLID => &self.solid,
                 kind::OPEN => &self.open,
                 kind::SOLID_INST => &self.inst,
+                kind::GROUND => &self.ground,
                 _ => &self.inst_open,
             };
             if current.map(|c| c.0) != Some(b.kind) {
                 pass.bind(ctx, shadow);
                 gpu::state_opaque(ctx, if b.kind == kind::OPEN || b.kind == kind::OPEN_INST { Cull::None } else { Cull::Cw });
                 current = Some((b.kind, NO_TEX));
+            }
+            if b.kind == kind::GROUND && current.map(|c| c.1) != Some(b.tex) {
+                if let Some(Some(t)) = self.textures.get(b.tex as usize) {
+                    g::sceGxmSetFragmentTexture(ctx, pass.units[0], &t.gxm);
+                }
+                current = Some((b.kind, b.tex));
             }
             if b.kind == kind::WALL && current.map(|c| c.1) != Some(b.tex) {
                 if let Some(Some(t)) = self.textures.get(b.tex as usize) {
@@ -405,8 +420,18 @@ impl CityGpu {
             } else {
                 v.set(pass.mvp, &mat::with_bounds(vp, b.origin, b.span));
                 v.set(pass.bx, &[b.origin[0], b.origin[1], b.origin[2], 0.0, b.span[0], b.span[1], b.span[2], 0.0]);
-                let vb = if b.kind == kind::WALL { walls } else { solids };
-                gpu::draw(ctx, vb.add(b.vtx_first as usize * 20), indices.add((b.idx_first + it.from) as usize), it.to - it.from);
+                let (vb, stride) = match b.kind {
+                    kind::WALL => (walls, 20),
+                    kind::GROUND => {
+                        let metres = self.texs.get(b.tex as usize).map(|e| e.metres).unwrap_or(16.0).max(0.5);
+                        let k = 1.0 / metres;
+                        let (ox, oz) = ((b.origin[0] * k).floor(), (b.origin[2] * k).floor());
+                        v.set(pass.tile, &[k, -ox, -oz, 0.0]);
+                        (grounds, 16)
+                    }
+                    _ => (solids, 20),
+                };
+                gpu::draw(ctx, vb.add(b.vtx_first as usize * stride), indices.add((b.idx_first + it.from) as usize), it.to - it.from);
                 stats.tris[if b.kind == kind::WALL { 0 } else { 1 }] += (it.to - it.from) / 3;
             }
             stats.draws += 1;

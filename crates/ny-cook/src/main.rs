@@ -181,6 +181,8 @@ fn main() {
     let mut textures = tex::Textures::default();
     let facades = facade::load(&ir_dir, &mut textures).unwrap_or_else(|e| panic!("{e}"));
     eprintln!("facades: {} styles, {} pictures", facades.styles.len(), textures.entries.len());
+    let grounds = ground_swatches(&ir_dir, &mut textures);
+    eprintln!("ground: {} pictures", grounds.len());
     let classes: Vec<Class> = ir.objects.iter().map(|o| classify(&ir, o, &facades)).collect();
     let mut sources: HashMap<usize, Source> = HashMap::new();
     let mut mats: HashMap<usize, Vec<f32>> = HashMap::new();
@@ -315,7 +317,8 @@ fn main() {
                 for (slot, tris) in &src.lods[lod] {
                     let mat = &ir.materials[o.material(*slot)];
                     let unlit = mat.kind == "MeshBasicNodeMaterial";
-                    let kind = if mat.side == 2 { pack::kind::OPEN } else { pack::kind::SOLID };
+                    let ground = mat.factory.as_ref().and_then(|f| grounds.get(f)).copied();
+                    let kind = if ground.is_some() { pack::kind::GROUND } else if mat.side == 2 { pack::kind::OPEN } else { pack::kind::SOLID };
                     let mut groups: HashMap<(u32, u8), Vec<u32>> = HashMap::new();
                     for f in tris.chunks(3) {
                         let c = geom::scale(geom::add(geom::add(geom::point(m, src.pos[f[0] as usize]), geom::point(m, src.pos[f[1] as usize])), geom::point(m, src.pos[f[2] as usize])), 1.0 / 3.0);
@@ -323,10 +326,13 @@ fn main() {
                     }
                     let label = format!("{} {} (cut)", o.path.split('/').take(2).collect::<Vec<_>>().join("/"), mat.factory.clone().unwrap_or_else(|| format!("{}#{:06x}", mat.kind.replace("NodeMaterial", ""), mat.color.unwrap_or(0))));
                     for ((place, sub), part) in groups {
-                        let (verts, idx) = vertices(src, &part, probe, *i, Some((m, &nm, mirror)), unlit, false);
+                        let (mut verts, idx) = vertices(src, &part, probe, *i, Some((m, &nm, mirror)), unlit, false);
+                        if let Some((_, mean)) = ground {
+                            to_tint(&mut verts, mean);
+                        }
                         if !idx.is_empty() {
                             *spend.entry((lod, label.clone())).or_default() += idx.len() / 3;
-                            bins.bin(lod_id, place, kind, pack::NO_TEX).add(&verts, &idx, sub);
+                            bins.bin(lod_id, place, kind, ground.map(|g| g.0).unwrap_or(pack::NO_TEX)).add(&verts, &idx, sub);
                         }
                     }
                 }
@@ -381,12 +387,16 @@ fn main() {
                     *spend.entry((lod, label)).or_default() += tris.len() / 3;
                     continue;
                 }
-                let kind = if mat.side == 2 { pack::kind::OPEN } else { pack::kind::SOLID };
+                let ground = mat.factory.as_ref().and_then(|f| grounds.get(f)).copied().filter(|_| class == Class::Solid);
+                let kind = if ground.is_some() { pack::kind::GROUND } else if mat.side == 2 { pack::kind::OPEN } else { pack::kind::SOLID };
                 // A facade box gives its roof only: the walls are `facade_instance`'s, the bottom is never seen.
-                let (verts, idx) = vertices(src, tris, probe, *i, Some((m, &nm, mirror)), unlit, class == Class::Facade);
+                let (mut verts, idx) = vertices(src, tris, probe, *i, Some((m, &nm, mirror)), unlit, class == Class::Facade);
+                if let Some((_, mean)) = ground {
+                    to_tint(&mut verts, mean);
+                }
                 if !idx.is_empty() {
                     *spend.entry((lod, label)).or_default() += idx.len() / 3;
-                    let bin: &mut Bin = bins.bin(lod_id, place, kind, pack::NO_TEX);
+                    let bin: &mut Bin = bins.bin(lod_id, place, kind, ground.map(|g| g.0).unwrap_or(pack::NO_TEX));
                     bin.add(&verts, &idx, sub);
                 }
             }
@@ -598,4 +608,28 @@ fn hours(ir: &std::path::Path) -> Vec<pack::Preset> {
             }
         })
         .collect()
+}
+
+/// The ground pictures the export baked (`bake.json` `ground`), by the factory of the material that drew them: the
+/// picture and its mean colour (linear).
+fn ground_swatches(ir: &std::path::Path, textures: &mut tex::Textures) -> HashMap<String, (u32, [f32; 3])> {
+    let text = std::fs::read_to_string(ir.join("bake.json")).unwrap_or_default();
+    let bake: serde_json::Value = serde_json::from_str(&text).unwrap_or(serde_json::Value::Null);
+    let mut out = HashMap::new();
+    for g in bake["ground"].as_array().into_iter().flatten() {
+        let (Some(f), Some(file), Some(metres)) = (g["factory"].as_str(), g["file"].as_str(), g["metres"].as_f64()) else { continue };
+        let t = textures.add_png(&ir.join(file), metres as f32).unwrap_or_else(|e| panic!("{e}"));
+        out.insert(f.to_string(), (t, textures.mean(t)));
+    }
+    out
+}
+
+/// A ground vertex's colour as a tint of its picture: what the probe saw there over the picture's mean.
+fn to_tint(verts: &mut [Vx], mean: [f32; 3]) {
+    for v in verts {
+        for k in 0..3 {
+            v.a[k] = ((geom::linear(v.a[k]) / mean[k].max(1e-3)) * 128.0).round().clamp(0.0, 255.0) as u8;
+        }
+        v.a[3] = 255;
+    }
 }
