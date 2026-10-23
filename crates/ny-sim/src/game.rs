@@ -85,8 +85,10 @@ pub struct Game {
     /// The sidewalks' pedestrians, and the highway's cars.
     pub crowd: Crowd,
     pub highway: Highway,
-    /// Cars, people and the highway's cars (a device may turn them off).
+    /// Cars, people and the highway's cars (a device may turn them off); and the people and the highway's cars alone.
     pub traffic_on: bool,
+    pub crowd_on: bool,
+    pub highway_on: bool,
 }
 
 impl Game {
@@ -104,7 +106,7 @@ impl Game {
         let highway = Highway::new(&world);
         let mut cameras = Cameras::default();
         cameras.set_preset(&world, CHASE, true);
-        Game { mode: Mode::Drive, hour: Hour::Golden, camera: CHASE, clock: 0.0, world, players, cameras, traffic, crowd, highway, traffic_on: true }
+        Game { mode: Mode::Drive, hour: Hour::Golden, camera: CHASE, clock: 0.0, world, players, cameras, traffic, crowd, highway, traffic_on: true, crowd_on: true, highway_on: true }
     }
 
     /// `selectMode`: the player moves the other entity, and a scenic camera hands over to the chase camera.
@@ -184,9 +186,13 @@ impl Game {
             let sight = Sight { eye: v.eye, dir: (v.look - v.eye).normalize(), half_fov };
             let focus = [self.cameras.pos.x, self.cameras.pos.z];
             self.traffic.step(&self.world, dt, self.clock, focus, &sight, &player);
-            self.crowd.step(&self.world, &mut self.traffic, dt, self.clock, focus, &sight);
+            if self.crowd_on {
+                self.crowd.step(&self.world, &mut self.traffic, dt, self.clock, focus, &sight);
+            }
             let on_road = PlayerOnRoad { x: body.pos.x, y: body.pos.y, z: body.pos.z, vx, vz };
-            self.highway.step(&self.world, dt, if self.mode == Mode::Fly { None } else { Some(&on_road) });
+            if self.highway_on {
+                self.highway.step(&self.world, dt, if self.mode == Mode::Fly { None } else { Some(&on_road) });
+            }
             // The player is pushed off a car it ran into, and loses most of its speed
             if player.active {
                 let b = self.players.body_mut(self.mode);

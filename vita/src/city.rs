@@ -204,6 +204,8 @@ pub struct Show {
     pub walls: bool,
     pub solids: bool,
     pub instances: bool,
+    /// Metres within which trees are drawn.
+    pub trees: f32,
 }
 
 /// The pack's own streams, in GPU-mapped memory.
@@ -544,7 +546,12 @@ impl CityGpu {
             let on = match b.kind {
                 kind::WALL => show.walls,
                 kind::SOLID | kind::OPEN => show.solids,
-                kind::SOLID_INST | kind::OPEN_INST | kind::LEAF_INST => show.instances,
+                kind::SOLID_INST | kind::OPEN_INST => show.instances,
+                kind::LEAF_INST => show.instances && {
+                    let c = &self.cells[it.cell.min(self.cells.len() as u32 - 1) as usize];
+                    let (dx, dz) = ((c.min[0] + c.max[0]) * 0.5 - eye.x, (c.min[2] + c.max[2]) * 0.5 - eye.z);
+                    it.cell != RESIDENT && dx * dx + dz * dz < show.trees * show.trees
+                },
                 kind::GROUND | kind::PICTURE => show.solids,
                 kind::PICTURE_INST => show.instances,
                 _ => false,

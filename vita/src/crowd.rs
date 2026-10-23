@@ -12,7 +12,7 @@ use crate::city::{self, CityGpu};
 
 /// People nearer than this take the near figure; none is drawn past `PEOPLE_REACH`, nor more than `PEOPLE_MAX` of
 /// them (the nearest). The far figure is 954 triangles, the near one 3 434.
-pub const NEAR_PERSON: f32 = 25.0;
+pub const NEAR_PERSON: f32 = 15.0;
 pub const PEOPLE_REACH: f32 = 100.0;
 pub const PEOPLE_MAX: usize = 48;
 /// Below this speed a person stands.

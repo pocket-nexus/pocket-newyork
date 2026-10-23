@@ -521,10 +521,10 @@ mod tests {
         assert_eq!(core::mem::size_of::<GroundVertex>(), 16);
         assert_eq!(core::mem::size_of::<Batch>(), 64);
         assert_eq!(core::mem::size_of::<Instance>(), 52);
-        assert_eq!(core::mem::size_of::<TexEntry>(), 32);
+        assert_eq!(core::mem::size_of::<TexEntry>(), 36);
         assert_eq!(core::mem::size_of::<Cell>(), 40);
         assert_eq!(core::mem::size_of::<NearCell>(), 32);
-        assert_eq!(core::mem::size_of::<Model>(), 32);
+        assert_eq!(core::mem::size_of::<Model>(), 56);
         assert_eq!(core::mem::size_of::<Heights>(), 32);
     }
 

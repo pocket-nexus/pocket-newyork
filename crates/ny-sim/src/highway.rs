@@ -90,6 +90,12 @@ pub struct PlayerOnRoad {
 pub struct Highway {
     pub lanes: Vec<Lane>,
     pub cars: Vec<HighwayCar>,
+    /// A lane steps every `every` frames, the lanes in turn, with the time since its last step (1, the reference's
+    /// own: every lane every frame). Between its steps a lane's cars are drawn on along at their speed (`pose`).
+    pub every: u32,
+    turn: u32,
+    /// Seconds since each lane last stepped.
+    owed: Vec<f64>,
 }
 
 fn ease(x: f64) -> f64 {
@@ -155,7 +161,8 @@ impl Highway {
             }
             lanes.push(Lane { first: l.first as usize, count: n, speed, cum, len, yaw, bounds, cars: lane_cars });
         }
-        Highway { lanes, cars }
+        let owed = vec![0.0; lanes.len()];
+        Highway { lanes, cars, every: 1, turn: 0, owed }
     }
 
     /// The player's place and speed along `lane` if it is in it (within 2 m of its centre line and near its height,
@@ -194,11 +201,21 @@ impl Highway {
         None
     }
 
-    /// One frame of every lane's traffic (`update`, step 1), and every car's segment (step 2's walk along its lane).
+    /// One frame of the lanes' traffic (`update`, step 1), and their cars' segments (step 2's walk along its lane):
+    /// every lane, or with `every` above 1 the lanes whose turn it is, over the time since they last stepped.
     pub fn step(&mut self, world: &World, dt: f32, player: Option<&PlayerOnRoad>) {
-        let dt = dt as f64;
+        let every = self.every.max(1) as usize;
+        for o in &mut self.owed {
+            *o += dt as f64;
+        }
         let brake_term = 2.0 * sqrt(A * B);
+        let turn = self.turn as usize;
+        self.turn = self.turn.wrapping_add(1);
         for li in 0..self.lanes.len() {
+            if li % every != turn % every {
+                continue;
+            }
+            let dt = core::mem::take(&mut self.owed[li]);
             let p_in = player.and_then(|p| Self::player_in_lane(world, &self.lanes[li], p));
             let lane = &self.lanes[li];
             let n = lane.cars.len();
@@ -234,20 +251,30 @@ impl Highway {
                     c.u -= lane.len;
                     c.seg = 0;
                 }
-            }
-        }
-        for c in &mut self.cars {
-            let cum = &self.lanes[c.lane as usize].cum;
-            while c.seg + 2 < cum.len() && cum[c.seg + 1] < c.u {
-                c.seg += 1;
+                while c.seg + 2 < lane.cum.len() && lane.cum[c.seg + 1] < c.u {
+                    c.seg += 1;
+                }
             }
         }
     }
 
     /// Where car `i` is drawn: place, heading, pitch (`update`, step 2), and how far into its lane's end dip.
     pub fn pose(&self, world: &World, i: usize) -> (V3, f32, f32, f64) {
-        let c = &self.cars[i];
+        let mut c = self.cars[i];
         let lane = &self.lanes[c.lane as usize];
+        // On along its lane at its speed since the lane last stepped.
+        let owed = self.owed[c.lane as usize];
+        if owed > 0.0 {
+            c.u += c.v * owed;
+            if c.u >= lane.len {
+                c.u -= lane.len;
+                c.seg = 0;
+            }
+            while c.seg + 2 < lane.cum.len() && lane.cum[c.seg + 1] < c.u {
+                c.seg += 1;
+            }
+        }
+        let c = &c;
         let s = c.seg;
         let seg_len = lane.cum[s + 1] - lane.cum[s];
         let t = ((c.u - lane.cum[s]) / seg_len).clamp(0.0, 1.0);

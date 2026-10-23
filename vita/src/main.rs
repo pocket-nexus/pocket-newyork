@@ -79,6 +79,40 @@ pub unsafe extern "C" fn __wrap_sceGxmInitialize(params: *const g::SceGxmInitial
     __real_sceGxmInitialize(&p)
 }
 
+extern "C" {
+    fn __real_sceGxmCreateContext(params: *const g::SceGxmContextParams, context: *mut *mut g::SceGxmContext) -> i32;
+}
+
+/// The context's ring buffers: a frame of the city (the sun's map and the scene, some 1 500 draws and their
+/// uniforms) outgrows vita2d's (128 KiB of VDM commands, 2 MiB of vertex and 512 KiB of fragment uniforms) with
+/// two frames in flight, and the CPU would wait on the GPU for room.
+const VDM_RING: usize = 1024 * 1024;
+const VERTEX_RING: usize = 6 * 1024 * 1024;
+const FRAGMENT_RING: usize = 3 * 1024 * 1024;
+
+/// # Safety
+/// Called by vita2d in place of `sceGxmCreateContext`, with its parameters; the rings it is given live as long as
+/// the process.
+#[no_mangle]
+pub unsafe extern "C" fn __wrap_sceGxmCreateContext(params: *const g::SceGxmContextParams, context: *mut *mut g::SceGxmContext) -> i32 {
+    let mut p = *params;
+    let ring = |size: usize| -> Option<*mut core::ffi::c_void> {
+        let mut block = pocket_vita_gxm::mem::Block::with_access(Kind::Main, size, false).ok()?;
+        let at = block.alloc(size, 4096)?;
+        core::mem::forget(block);
+        Some(at.cast())
+    };
+    if let (Some(vdm), Some(vertex), Some(fragment)) = (ring(VDM_RING), ring(VERTEX_RING), ring(FRAGMENT_RING)) {
+        p.vdmRingBufferMem = vdm;
+        p.vdmRingBufferMemSize = VDM_RING as u32;
+        p.vertexRingBufferMem = vertex;
+        p.vertexRingBufferMemSize = VERTEX_RING as u32;
+        p.fragmentRingBufferMem = fragment;
+        p.fragmentRingBufferMemSize = FRAGMENT_RING as u32;
+    }
+    __real_sceGxmCreateContext(&p, context)
+}
+
 /// Samples per pixel of the display surface the scene is drawn into.
 const DEFAULT_MSAA: u64 = 4;
 
@@ -317,6 +351,7 @@ fn apply_control(v: &Value, s: &mut Settings, game: &mut Game, session: &mut Ses
     s.show.walls = flag("walls", s.show.walls);
     s.show.solids = flag("solids", s.show.solids);
     s.show.instances = flag("instances", s.show.instances);
+    s.show.trees = num("trees", s.show.trees);
     // `near`, `mid` and `detail` set the reaches outright and stop the governor; `budget` hands them back to it.
     if v.get("near").is_some() || v.get("mid").is_some() || v.get("detail").is_some() || v.get("far").is_some() {
         s.show.reach.near = num("near", s.show.reach.near);
@@ -346,6 +381,12 @@ fn apply_control(v: &Value, s: &mut Settings, game: &mut Game, session: &mut Ses
     }
     if let Some(p) = v["place"].as_u64() {
         game.teleport_to(p as usize);
+    }
+    if let Some(on) = v["crowd"].as_bool() {
+        game.crowd_on = on;
+    }
+    if let Some(on) = v["highway"].as_bool() {
+        game.highway_on = on;
     }
     if let Some(t) = v["teleport"].as_array() {
         let f = |i: usize| t.get(i).and_then(Value::as_f64).unwrap_or(0.0) as f32;
@@ -546,7 +587,13 @@ fn main() {
         let mut gait = 0.0f32;
         let mut placed: Vec<(usize, ny_pack::Instance)> = Vec::with_capacity(city::MODEL_INSTANCES);
         let mut sun_tris = 0u32;
+        let mut shown_late = false;
+        // Milliseconds (smoothed) of the frame's CPU parts: placing what moves, the sun's pass, the city's, the models'.
+        let mut cpu_part = [0.0f32; 4];
         let mut game = Game::with_world(world);
+        // The highway's 2 642 cars cost this CPU some 12 ms a frame stepped together: a lane at a time, every eighth frame
+        // each.
+        game.highway.every = 8;
         let mut session = Session::new();
         session.traffic = true;
         session.cameras = game.world.cameras.len() as u8;
@@ -562,7 +609,7 @@ fn main() {
         let control = if live { control_watcher() } else { mpsc::channel().1 };
         let mut set = Settings {
             profile: false,
-            show: Show { reach: Reach { detail: 110.0, near: 260.0, mid: 1400.0, far: 7000.0 }, walls: true, solids: true, instances: true },
+            show: Show { reach: Reach { detail: 110.0, near: 260.0, mid: 1400.0, far: 7000.0 }, walls: true, solids: true, instances: true, trees: 400.0 },
             // Thirty frames a second: the city takes what a second refresh gives it.
             pace: boot["pace"].as_i64().unwrap_or(2) as i32,
             interface: true,
@@ -570,7 +617,7 @@ fn main() {
             post: true,
             sun: true,
             view: None,
-            budget: 380_000,
+            budget: 300_000,
             govern: true,
             full: Reach { detail: 160.0, near: 420.0, mid: 2400.0, far: 7000.0 },
         };
@@ -668,6 +715,7 @@ fn main() {
             // This slot's vertices were last used two frames ago: the GPU must be done with them.
             fence.wait(slot);
             let waited = t2.elapsed();
+            let tp = Instant::now();
             // What moves: the traffic, and the player's vehicle.
             placed.clear();
             if game.traffic_on && set.models {
@@ -728,6 +776,9 @@ fn main() {
                 }
             }
             let groups = city.prepare_models(&mut placed);
+            let smooth = |a: &mut f32, t: Instant| *a = *a * 0.9 + t.elapsed().as_secs_f32() * 100.0;
+            smooth(&mut cpu_part[0], tp);
+            let ts = Instant::now();
             // The sun's depth map around the eye, before the frame (not under the moon: its light casts little).
             if set.sun && preset.night < 0.5 {
                 sunmap.place(eye, v3(sun[0], sun[1], sun[2]));
@@ -739,6 +790,7 @@ fn main() {
                 sunmap.off();
                 sun_tris = 0;
             }
+            smooth(&mut cpu_part[1], ts);
             // What is bright in the frame on display glows over this one, as the reference's bloom does for the hour:
             // its strength, and its threshold where the display shows it (a little under: the chain sees the display's
             // compressed highlights).
@@ -755,9 +807,13 @@ fn main() {
             // The sky covers the whole frame: nothing is cleared.
             g::sceGxmSetViewport(ctx, 480.0, 480.0, 272.0, -272.0, 0.0, 1.0);
             sky.draw(ctx, &sky_mvp, game.hour.index());
+            let tc = Instant::now();
             stats = city.draw(ctx, &vp, eye, &frame, &look, &haze, night, shadows.texture(), &sunmap, &set.show, frame_no);
+            smooth(&mut cpu_part[2], tc);
             if set.models {
+                let tm = Instant::now();
                 stats.tris[2] += city.draw_models(ctx, &vp, &frame, &look, &haze, night, shadows.texture(), &sunmap, &groups);
+                smooth(&mut cpu_part[3], tm);
             }
             if set.post {
                 glow.add(ctx, glow_gain);
@@ -779,10 +835,11 @@ fn main() {
                 gpu_ms = gpu_ms * 0.9 + tg.elapsed().as_secs_f32() * 100.0;
             }
             // The reaches follow the triangle budget: in quickly when a frame draws too many, out slowly when there is
-            // room; they also come in when this frame had to wait for the GPU, and stay in for two seconds after.
+            // room; they also come in when this frame had to wait for the GPU or the last one was shown late (the
+            // CPU's work grows with the reaches too: the draws, the sun's pass), and stay in for two seconds after.
             if set.govern {
                 let drawn = stats.tris[0] + stats.tris[1] + stats.tris[2];
-                let behind = !set.profile && waited.as_secs_f32() > BEHIND * set.pace as f32;
+                let behind = !set.profile && (waited.as_secs_f32() > BEHIND * set.pace as f32 || shown_late);
                 if behind {
                     hold = (120 / set.pace) as u32;
                 }
@@ -806,6 +863,7 @@ fn main() {
             let now = Instant::now();
             let shown = refreshes(sceDisplayGetVcount(), last_vcount);
             timing.push((now - last).as_secs_f32() * 1000.0, shown > set.pace);
+            shown_late = shown > set.pace;
             if shown > set.pace {
                 if worked.as_secs_f32() > 0.012 * set.pace as f32 {
                     late_cpu += 1;
@@ -833,7 +891,7 @@ fn main() {
                     "pack": {"path": pack_path, "sha256": pack_id["sha256"], "bytes": pack_id["bytes"], "profile": meta["profile"]},
                     "loadMs": load_ms, "copyMs": copy_ms,
                     "frameMs": timing.avg(), "worstMs": timing.worst(), "late": timing.late, "lateBy": {"cpu": late_cpu, "gpu": late_gpu}, "frames": timing.frames, "pace": set.pace,
-                    "cpuMs": {"draw": draw_ms, "sim": sim_ms, "interface": ui_ms, "interfaceDraw": ui_draw_ms},
+                    "cpuMs": {"draw": draw_ms, "sim": sim_ms, "interface": ui_ms, "interfaceDraw": ui_draw_ms, "place": cpu_part[0], "sunPass": cpu_part[1], "city": cpu_part[2], "models": cpu_part[3]},
                     "gpuMs": if set.profile { json!(gpu_ms) } else { Value::Null },
                     "city": {"draws": stats.draws, "tris": {"wall": stats.tris[0], "solid": stats.tris[1], "instanced": stats.tris[2], "sun": sun_tris}, "places": stats.places},
                     "near": {"slots": [filled, slots], "reads": city.near.reads, "mb": city.near.bytes as f32 / 1e6, "starved": city.near.starved},
