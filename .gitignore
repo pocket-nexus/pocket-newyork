@@ -1,0 +1,6 @@
+node_modules/
+target/
+.pocket-build/
+dist/
+.DS_Store
+web/vendor/three/
