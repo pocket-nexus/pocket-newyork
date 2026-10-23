@@ -11,6 +11,7 @@
 //! frame timings under `engine`.
 
 mod city;
+mod crowd;
 mod glow;
 mod gpu;
 mod hostfs;
@@ -541,6 +542,7 @@ fn main() {
         let run: Vec<Option<usize>> = (0..8).map(|k| city.model(&format!("person-run-{k}"))).collect();
         let stand = city.model("person-stand");
         let rider: Vec<Option<usize>> = (0..8).map(|k| city.model(&format!("rider-{k}"))).collect();
+        let mut crowd = crowd::Crowd::new(&city);
         let mut gait = 0.0f32;
         let mut placed: Vec<(usize, ny_pack::Instance)> = Vec::with_capacity(city::MODEL_INSTANCES);
         let mut sun_tris = 0u32;
@@ -683,6 +685,8 @@ fn main() {
                     let tint = display(v.paint);
                     placed.push((m, city::placed(v.x, 0.0, v.z, v.yaw, v.pitch, v.roll, tint)));
                 }
+                // The sidewalks' people and the highway's cars
+                crowd.place(&game, eye, &planes, reach, &mut placed);
             }
             let pl = &game.players;
             match game.mode {

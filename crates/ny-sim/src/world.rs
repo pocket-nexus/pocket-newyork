@@ -108,6 +108,12 @@ pub struct World {
     pub lanes: Vec<f32>,
     pub moves: Vec<TrafficMove>,
     pub outs: Vec<i8>,
+    /// Where pedestrians may walk, per edge and per node (empty in a pack without them).
+    pub walk_edges: Vec<WalkEdge>,
+    pub walk_nodes: Vec<WalkNode>,
+    /// The highway's lanes and their centre lines' points (empty in a pack without them).
+    pub highway: Vec<HighwayLane>,
+    pub highway_pts: Vec<[f32; 3]>,
 }
 
 /// The reference's cell sizes: colliders 48 m (controllers.js), blocks and roads 64 m (city-config.js).
@@ -136,6 +142,14 @@ impl World {
         let outs: Vec<i8> = need(MOUT)?.into_iter().map(|b| b as i8).collect();
         let cameras: Vec<CameraPreset> = table(&need(CAMS)?);
         let ents: Vec<EntityStart> = table(&need(ENTS)?);
+        let mut walk_edges: Vec<WalkEdge> = get(WALK).map(|b| table(&b)).unwrap_or_default();
+        let mut walk_nodes: Vec<WalkNode> = get(WNOD).map(|b| table(&b)).unwrap_or_default();
+        if walk_edges.len() != edges.len() || walk_nodes.len() != nodes.len() {
+            walk_edges.clear();
+            walk_nodes.clear();
+        }
+        let highway: Vec<HighwayLane> = get(HWYL).map(|b| table(&b)).unwrap_or_default();
+        let highway_pts: Vec<[f32; 3]> = get(HWYP).map(|b| table(&b)).unwrap_or_default();
         if ents.len() != 4 {
             return Err("ENTS holds four entities".into());
         }
@@ -175,6 +189,10 @@ impl World {
             lanes,
             moves,
             outs,
+            walk_edges,
+            walk_nodes,
+            highway,
+            highway_pts,
             ..Default::default()
         };
         w.index();

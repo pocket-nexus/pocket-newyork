@@ -281,13 +281,18 @@ async function people(app, renderer, camera) {
   const c = app.controllers;
   const p = c.entities.person;
   if (p?.rig && p?.crowd) {
-    const mesh = p.crowd.meshes[0];
     const ground = (owner, x, z) => 0;
-    const pose = async (name) => {
+    // `far`: the crowd's far level of detail (PersonCrowd's second mesh, beyond its farDistance); `coat`: the coat
+    // as paint (see exportModels), for a crowd whose people each wear their own.
+    const pose = async (name, { far = false, coat = false } = {}) => {
+      const mesh = p.crowd.meshes[far ? 1 : 0];
+      const keep = p.crowd.farDistance;
+      p.crowd.farDistance = far ? 0 : Infinity;
       p.crowd.begin();
-      p.crowd.add(p.rig, 0);
+      p.crowd.add(p.rig, far ? 1 : 0);
       p.crowd.end();
-      const part = { model: name, geo: mesh.geometry, mat: mesh.material, count: 1 };
+      p.crowd.farDistance = keep;
+      const part = { model: name, geo: mesh.geometry, mat: mesh.material, count: 1, coat };
       const pos = await evaluate(renderer, camera, part, 'position', 1);
       // Into the person's frame: about its root, turned by its heading.
       const n = mesh.geometry.attributes.position.count;
@@ -299,7 +304,7 @@ async function people(app, renderer, camera) {
         local[i * 3 + 1] = y;
         local[i * 3 + 2] = -x * s + z * co;
       }
-      out.push({ model: name, geo: mesh.geometry, mat: mesh.material, count: 1, positions: local });
+      out.push({ model: name, geo: mesh.geometry, mat: mesh.material, count: 1, positions: local, coat });
     };
     for (const [gait, speed] of [['walk', 1.6], ['run', 5.5]]) {
       let x = 0, z = 0;
@@ -320,6 +325,11 @@ async function people(app, renderer, camera) {
           if (d < (p.rig.phase - before + 1) % 1) break;
         }
         await pose(`person-${gait}-${f}`);
+        // The sidewalks' crowd walks only: near and far, coats as paint.
+        if (gait === 'walk') {
+          await pose(`crowd-walk-${f}`, { coat: true });
+          await pose(`crowd-far-walk-${f}`, { far: true, coat: true });
+        }
       }
     }
     {
@@ -327,6 +337,8 @@ async function people(app, renderer, camera) {
       p.rig.reset(x, z, 0, ground, null);
       for (let k = 0; k < 480; k++) p.rig.update(1 / 240, x, z, 0, ground, null, 0);
       await pose('person-stand');
+      await pose('crowd-stand', { coat: true });
+      await pose('crowd-far-stand', { far: true, coat: true });
     }
   }
   const b = c.entities.cyclist;
@@ -385,14 +397,22 @@ export async function exportModels(app) {
       v.fromBufferAttribute(g.attributes.position, i).applyMatrix4(part.m).toArray(pos, i * 3);
       if (g.attributes.normal) v.fromBufferAttribute(g.attributes.normal, i).applyMatrix3(nm).normalize().toArray(nrm, i * 3);
     }
-    // Albedo with white paint (sRGB), how much of it the paint is, and the night's emission (RGBM, × 16).
+    // Albedo with white paint (sRGB), how much of it the paint is, and the night's emission (RGBM, × 16). A crowd's
+    // person (`coat`) has its coat and sleeves (pedestrians.js PART.BODY and PART.ARM) as white paint, which each
+    // person's tint colours.
     const color = new Uint8Array(n * 4);
     const emit = new Uint8Array(n * 4);
+    const partOf = part.coat && g.attributes.skin ? (i) => Math.round(g.attributes.skin.getW(i)) : null;
     for (let i = 0; i < n; i++) {
       const w = [white[i * 4], white[i * 4 + 1], white[i * 4 + 2]];
       const b = [black[i * 4], black[i * 4 + 1], black[i * 4 + 2]];
       const lw = w[0] + w[1] + w[2];
-      const paint = lw > 1e-4 ? Math.min(1, Math.max(0, 1 - (b[0] + b[1] + b[2]) / lw)) : 0;
+      let paint = lw > 1e-4 ? Math.min(1, Math.max(0, 1 - (b[0] + b[1] + b[2]) / lw)) : 0;
+      const coat = partOf && (partOf(i) === 0 || partOf(i) === 3);
+      if (coat) {
+        paint = 1;
+        w[0] = w[1] = w[2] = 1;
+      }
       for (let k = 0; k < 3; k++) color[i * 4 + k] = toSrgb(w[k]);
       color[i * 4 + 3] = Math.round(paint * 254);
       const e = [glow[i * 4], glow[i * 4 + 1], glow[i * 4 + 2]].map((x) => Math.max(0, x));

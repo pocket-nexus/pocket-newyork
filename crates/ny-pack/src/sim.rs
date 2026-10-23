@@ -21,6 +21,12 @@
 //! | `MOUT` | `i8` per lane of a move's edge: the lane of the next edge it leads to, or -1 |
 //! | `CAMS` | `CameraPreset` table, in the reference's order |
 //! | `ENTS` | `EntityStart` × 4: person, car, cyclist, helicopter |
+//! | `WALK` | `WalkEdge` per edge of `EDGE`: where pedestrians may walk beside it, the crosswalks its vehicles cross |
+//! | `WNOD` | `WalkNode` per node of `NODE`: its crosswalks and where pedestrians may cross them |
+//! | `HWYL` | `HighwayLane` table: the highway's lanes |
+//! | `HWYP` | `[f32; 3]` points of the highway lanes' centre lines |
+//!
+//! `WALK` to `HWYP` are optional: a pack without them has no pedestrians and no highway traffic.
 
 use crate::tag;
 
@@ -41,6 +47,10 @@ pub const MOVE: u32 = tag(b"MOVE");
 pub const MOUT: u32 = tag(b"MOUT");
 pub const CAMS: u32 = tag(b"CAMS");
 pub const ENTS: u32 = tag(b"ENTS");
+pub const WALK: u32 = tag(b"WALK");
+pub const WNOD: u32 = tag(b"WNOD");
+pub const HWYL: u32 = tag(b"HWYL");
+pub const HWYP: u32 = tag(b"HWYP");
 
 /// Every section the simulation reads.
 pub const SECTIONS: [u32; 17] = [SIMW, COLL, SHOR, SBLK, SPTS, ROAD, STRT, LMRK, TELE, NAME, NODE, EDGE, LANE, MOVE, MOUT, CAMS, ENTS];
@@ -197,6 +207,55 @@ pub struct TrafficMove {
     pub pad: u32,
 }
 
+/// Steps of the offsets a sidewalk track may take beside an edge (`WalkEdge::walk`): `half + 1.4 + k × OFF_STEP`.
+pub const OFF_STEPS: u32 = 53;
+pub const OFF_STEP: f32 = 0.05;
+/// Steps of the lines a crosswalk track may take off its centre line (`WalkNode::lines`): `0.5 + k × LINE_STEP`.
+pub const LINE_STEPS: u32 = 12;
+pub const LINE_STEP: f32 = 0.05;
+
+/// Where the reference's pedestrians may walk beside an edge, as its own tests found it (traffic.js
+/// `sidewalkTrack`): bit k of `walk[0]` (to its right) or `walk[1]` (to its left) for a track `half + 1.4 + k ×
+/// OFF_STEP` off its lanes' centre line; and what its vehicles need of the crosswalks: the road's half width, the
+/// sides of `to` and of `from` it arrives and leaves over, the lateral axis a lane meets them along, whether it is a
+/// centreline street.
+#[derive(Clone, Copy, Debug, Default)]
+#[repr(C)]
+pub struct WalkEdge {
+    pub half: f32,
+    pub clx: f32,
+    pub clz: f32,
+    pub in_side: u8,
+    pub out_side: u8,
+    pub general: u8,
+    pub pad: u8,
+    pub walk: [u64; 2],
+}
+
+/// A signalized intersection's crosswalks (traffic.js `crosswalkTrack`), sides 0 east and 1 west of the avenue
+/// (across the street), 2 south and 3 north of the street (across the avenue): the edge whose road each spans (-1:
+/// none), that road's centre (x for an avenue, z for a street) and half width, and which lines make a track, bit k
+/// for `0.5 + k × LINE_STEP` on the side's own sign and bit `LINE_STEPS + k` on the other.
+#[derive(Clone, Copy, Debug, Default)]
+#[repr(C)]
+pub struct WalkNode {
+    pub road: [i32; 4],
+    pub across: [f32; 4],
+    pub half: [f32; 4],
+    pub lines: [u32; 4],
+}
+
+/// A lane of the highway (city-grid.js `highwayLanes`): its centre line, `count` points of `HWYP` from `first`, and
+/// the speed its traffic keeps.
+#[derive(Clone, Copy, Debug, Default)]
+#[repr(C)]
+pub struct HighwayLane {
+    pub first: u32,
+    pub count: u32,
+    pub speed: f32,
+    pub pad: u32,
+}
+
 /// One of the reference's cameras: vertical field of view (degrees), whether it is scenic (fixed or scripted) or
 /// follows the player, its id (`NAME` line).
 #[derive(Clone, Copy, Debug, Default)]
@@ -231,5 +290,8 @@ mod tests {
         assert_eq!(core::mem::size_of::<SimBlock>(), 32);
         assert_eq!(core::mem::size_of::<TrafficEdge>(), 64);
         assert_eq!(core::mem::size_of::<EntityStart>(), 32);
+        assert_eq!(core::mem::size_of::<WalkEdge>(), 32);
+        assert_eq!(core::mem::size_of::<WalkNode>(), 64);
+        assert_eq!(core::mem::size_of::<HighwayLane>(), 16);
     }
 }

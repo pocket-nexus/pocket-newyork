@@ -13,7 +13,9 @@
 //! | `camera` | cameras.js: chase, action, pov and the scenic views |
 //! | `location` | city-config.js `getLocationLabel`, `nearestRoads` |
 //! | `signal` | city-config.js `signalPhase`, `walkSignal` |
-//! | `traffic` | traffic.js and road-network.js, without lane changes and pedestrians |
+//! | `traffic` | traffic.js and road-network.js, without lane changes; the crosswalks held both ways |
+//! | `crowd` | traffic.js: the sidewalks' pedestrians and the crosswalks they cross |
+//! | `highway` | traffic.js `createHighwayTraffic`: the FDR Drive's and the West Side Highway's cars |
 //! | `world` | what they read: colliders, ground, shore, names, the road network |
 //!
 //! The crate builds without `std` (`default-features = false`): `core`, `alloc` and `libm`.
@@ -23,7 +25,9 @@
 extern crate alloc;
 
 pub mod camera;
+pub mod crowd;
 pub mod game;
+pub mod highway;
 pub mod location;
 pub mod math;
 pub mod player;

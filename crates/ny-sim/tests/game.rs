@@ -178,3 +178,111 @@ fn cars_wait_at_red_and_go_on_green() {
     assert!(red > 50 && red > green * 4, "cars wait at red: {red} on red, {green} on green");
     assert_eq!(crossed_red, 0);
 }
+
+/// The sidewalks' crowd around a signalized intersection for two minutes: everyone placed, on their tracks; people
+/// step off a curb only on their WALK, and no vehicle drives over someone on a crosswalk.
+#[test]
+fn pedestrians_cross_on_the_walk_and_vehicles_give_way() {
+    use ny_sim::signal::Timing;
+    let w = need_world!();
+    if w.walk_edges.is_empty() {
+        eprintln!("skipped: the pack has no walk tables");
+        return;
+    }
+    let timing = Timing(w.info.signal);
+    // The signalized intersection nearest the reference's start
+    let n = *w.nodes.iter().filter(|n| n.signal != 0).min_by(|a, b| ((a.x - 3.6).hypot(a.z - 410.6)).total_cmp(&(b.x - 3.6).hypot(b.z - 410.6))).unwrap();
+    let mut g = Game::with_world(w);
+    g.set_mode(Mode::Walk);
+    g.teleport(n.x + 25.0, n.z + 25.0, 0.0);
+    let dt = 1.0 / 60.0;
+    let kerb = 1.6;
+    let mut was: Vec<Option<(i32, f32, f32)>> = vec![None; g.pedestrians().len()];
+    let (mut stepped_off, mut off_walk, mut over, mut on_crosswalks) = (0, 0, 0, 0usize);
+    let t0 = std::time::Instant::now();
+    let frames = 120 * 60;
+    for f in 0..frames {
+        g.step(&Input::default(), dt);
+        let clock = g.clock;
+        for (i, p) in g.pedestrians().iter().enumerate() {
+            if !p.placed {
+                was[i] = None;
+                continue;
+            }
+            let x = p.track.ax + p.track.ux * p.t;
+            let z = p.track.az + p.track.uz * p.t;
+            assert!((x - p.x).abs() < 1e-3 && (z - p.z).abs() < 1e-3 && p.t >= -1e-3 && p.t <= p.track.len + 1e-3, "person {i} off its track");
+            if p.track.node < 0 {
+                was[i] = None;
+                continue;
+            }
+            let progress = if p.dir > 0.0 { p.t } else { p.track.len - p.t };
+            let mid = p.t > kerb && p.t < p.track.len - kerb;
+            if let Some((node, before, dir)) = was[i] {
+                if node == p.track.node && dir == p.dir && before <= kerb && progress > kerb && mid {
+                    stepped_off += 1;
+                    let avenue = p.track.side < 2;
+                    if !timing.walk(clock - dt, avenue) && !timing.walk(clock, avenue) {
+                        off_walk += 1;
+                    }
+                }
+            }
+            was[i] = Some((p.track.node, progress, p.dir));
+            if mid {
+                on_crosswalks += 1;
+                for v in g.vehicles() {
+                    if !v.placed() {
+                        continue;
+                    }
+                    let (fx, fz) = (v.yaw.sin(), v.yaw.cos());
+                    let (dx, dz) = (x - v.x, z - v.z);
+                    let along = (dx * fx + dz * fz).abs();
+                    let across = (dz * fx - dx * fz).abs();
+                    if along < v.half + 0.3 && across < v.half_width + 0.3 {
+                        over += 1;
+                        if over < 5 {
+                            eprintln!("frame {f}: person {i} under a vehicle at {x:.1}, {z:.1} (speed {:.1})", v.speed);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    let ms = t0.elapsed().as_secs_f32() * 1000.0 / frames as f32;
+    let placed = g.pedestrians().iter().filter(|p| p.placed).count();
+    let crossers = g.pedestrians().iter().filter(|p| p.placed && p.track.node >= 0).count();
+    let eye = g.view().eye;
+    let within = |r: f32| g.pedestrians().iter().filter(|p| p.placed && (p.x - eye.x).hypot(p.z - eye.z) < r).count();
+    eprintln!("crowd: within 25 m of the eye {}, 100 m {}, 320 m {}", within(25.0), within(100.0), within(320.0));
+    eprintln!("crowd: {placed} placed, {crossers} on crosswalks; {stepped_off} stepped off a curb ({off_walk} off the WALK), {on_crosswalks} person-frames on crosswalks, {over} under a vehicle; {ms:.3} ms a frame on this machine");
+    assert_eq!(placed, g.pedestrians().len());
+    assert!(crossers > 0 && stepped_off > 0, "nobody crossed");
+    assert_eq!(off_walk, 0, "stepped off a curb without the WALK");
+    assert_eq!(over, 0, "a vehicle drove over someone on a crosswalk");
+}
+
+/// The highway's cars run on, and a camera over the West Side Highway draws some.
+#[test]
+fn the_highway_runs_and_is_drawn() {
+    let w = need_world!();
+    if w.highway.is_empty() {
+        eprintln!("skipped: the pack has no highway lanes");
+        return;
+    }
+    let mut g = Game::with_world(w);
+    let before: f64 = g.highway.cars.iter().map(|c| c.u).sum();
+    for _ in 0..600 {
+        g.step(&Input::default(), 1.0 / 60.0);
+    }
+    let moving = g.highway.cars.iter().filter(|c| c.v > 1.0).count();
+    let after: f64 = g.highway.cars.iter().map(|c| c.u).sum();
+    let mut drawn = Vec::new();
+    let lane = &g.highway.lanes[0];
+    let p = g.world.highway_pts[lane.first + lane.count / 2];
+    g.highway.drawn(&g.world, ny_sim::math::V3 { x: p[0] + 60.0, y: 40.0, z: p[2] }, ny_sim::math::V3 { x: -1.0, y: -0.3, z: 0.0 }, &mut drawn);
+    let near = drawn.iter().filter(|c| (c.x - p[0] - 60.0).hypot(c.z - p[2]) < 700.0).count();
+    eprintln!("highway: {} cars, {moving} moving after 10 s, {} drawn from over its middle, {near} of them within 700 m", g.highway.cars.len(), drawn.len());
+    assert!(moving > g.highway.cars.len() / 2);
+    assert!(after != before);
+    assert!(!drawn.is_empty());
+}
