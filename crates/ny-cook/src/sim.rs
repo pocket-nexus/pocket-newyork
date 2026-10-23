@@ -151,7 +151,50 @@ pub fn add(w: &mut pack::Writer, ir: &Path) -> Result<bool, String> {
         });
     }
 
-    let sections: Vec<(u32, Vec<u8>)> = vec![
+    // Where pedestrians may walk, and the highway's lanes (optional: an older export has neither).
+    let mut walk_edges: Vec<WalkEdge> = Vec::new();
+    let mut walk_nodes: Vec<WalkNode> = Vec::new();
+    if let Some(wk) = s.get("walks") {
+        let bits = |v: &Value| v.as_f64().unwrap_or(0.0) as u64;
+        for e in wk["edges"].as_array().cloned().unwrap_or_default() {
+            walk_edges.push(WalkEdge {
+                half: f(&e["half"]),
+                clx: f(&e["clx"]),
+                clz: f(&e["clz"]),
+                in_side: e["inSide"].as_u64().unwrap_or(255).min(255) as u8,
+                out_side: e["outSide"].as_u64().unwrap_or(255).min(255) as u8,
+                general: e["general"].as_bool().unwrap_or(false) as u8,
+                pad: 0,
+                walk: [bits(&e["walk"][0]), bits(&e["walk"][1])],
+            });
+        }
+        for n in wk["nodes"].as_array().cloned().unwrap_or_default() {
+            let mut w = WalkNode { road: [-1; 4], ..Default::default() };
+            for (k, side) in n.as_array().cloned().unwrap_or_default().iter().enumerate().take(4) {
+                if side.is_null() {
+                    continue;
+                }
+                w.road[k] = side["road"].as_i64().unwrap_or(-1) as i32;
+                w.across[k] = f(&side["across"]);
+                w.half[k] = f(&side["half"]);
+                w.lines[k] = side["lines"].as_u64().unwrap_or(0) as u32;
+            }
+            walk_nodes.push(w);
+        }
+        if walk_edges.len() != edges.len() || walk_nodes.len() != nodes.len() {
+            return Err(format!("sim.json: walks for {} edges and {} nodes, the network has {} and {}", walk_edges.len(), walk_nodes.len(), edges.len(), nodes.len()));
+        }
+    }
+    let mut hwy_lanes: Vec<HighwayLane> = Vec::new();
+    let mut hwy_pts: Vec<[f32; 3]> = Vec::new();
+    for l in s["highway"].as_array().cloned().unwrap_or_default() {
+        let pts = floats(&l["pts"]);
+        let first = hwy_pts.len() as u32;
+        hwy_pts.extend(pts.chunks_exact(3).map(|p| [p[0], p[1], p[2]]));
+        hwy_lanes.push(HighwayLane { first, count: hwy_pts.len() as u32 - first, speed: f(&l["speed"]), pad: 0 });
+    }
+
+    let mut sections: Vec<(u32, Vec<u8>)> = vec![
         (SIMW, pack::bytes_of(&world).to_vec()),
         (COLL, slice_bytes(&colliders).to_vec()),
         (SHOR, slice_bytes(&shore_pairs).to_vec()),
@@ -170,6 +213,14 @@ pub fn add(w: &mut pack::Writer, ir: &Path) -> Result<bool, String> {
         (CAMS, slice_bytes(&cameras).to_vec()),
         (ENTS, slice_bytes(&ents).to_vec()),
     ];
+    if !walk_edges.is_empty() {
+        sections.push((WALK, slice_bytes(&walk_edges).to_vec()));
+        sections.push((WNOD, slice_bytes(&walk_nodes).to_vec()));
+    }
+    if !hwy_lanes.is_empty() {
+        sections.push((HWYL, slice_bytes(&hwy_lanes).to_vec()));
+        sections.push((HWYP, slice_bytes(&hwy_pts).to_vec()));
+    }
     // The same sections alone, beside the IR: what `cargo test -p ny-sim` reads, without a city pack.
     let mut alone = pack::Writer::default();
     for (t, bytes) in &sections {
@@ -178,14 +229,16 @@ pub fn add(w: &mut pack::Writer, ir: &Path) -> Result<bool, String> {
     }
     let _ = std::fs::write(ir.join("../sim.pack"), alone.finish());
     eprintln!(
-        "sim: {} colliders, {} blocks, {} roads, {} names, {} nodes, {} edges, {} moves",
+        "sim: {} colliders, {} blocks, {} roads, {} names, {} nodes, {} edges, {} moves, {} highway lanes of {} points",
         colliders.len(),
         blocks.len(),
         roads.len(),
         names.lines.len(),
         nodes.len(),
         edges.len(),
-        moves.len()
+        moves.len(),
+        hwy_lanes.len(),
+        hwy_pts.len()
     );
     Ok(true)
 }

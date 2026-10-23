@@ -226,3 +226,117 @@ fn teleports_arrive_where_the_reference_does() {
     }
     eprintln!("teleports: worst {worst:.4} m");
 }
+
+/// The highway's traffic against the reference's run (`web/pocket/sim.js` `highwayRun`): every car's place and
+/// speed every tenth frame of 15 s from the seeded start, then the transforms of the cars a camera draws.
+#[test]
+fn the_highway_drives_as_the_reference() {
+    use ny_sim::highway::Highway;
+    let w = need!(world(), "sim.pack");
+    let o = need!(oracle("highway.json"), "oracle/highway.json");
+    if w.highway.is_empty() {
+        eprintln!("skipped: the pack has no highway lanes");
+        return;
+    }
+    let mut h = Highway::new(&w);
+    let start = o["start"].as_array().unwrap();
+    assert_eq!(h.cars.len(), start.len(), "the seeded fleet");
+    let mut worst_start: f64 = 0.0;
+    for (c, s) in h.cars.iter().zip(start) {
+        assert_eq!(c.lane as i64, s[0].as_i64().unwrap());
+        let kind = match c.kind {
+            ny_sim::traffic::Kind::Taxi => 0,
+            ny_sim::traffic::Kind::Sedan => 1,
+            _ => 2,
+        };
+        assert_eq!(kind, s[1].as_i64().unwrap(), "car kind");
+        for k in 0..3 {
+            assert!((c.paint[k] as f64 - s[2 + k].as_f64().unwrap()).abs() < 1e-5, "paint");
+        }
+        worst_start = worst_start.max((c.u - s[5].as_f64().unwrap()).abs());
+    }
+    let dt = o["dt"].as_f64().unwrap() as f32;
+    let (mut worst_u, mut worst_v): (f64, f64) = (0.0, 0.0);
+    let mut frame = 0;
+    for rec in o["frames"].as_array().unwrap() {
+        let r = rec.as_array().unwrap();
+        let f = r[0].as_i64().unwrap();
+        while frame < f {
+            h.step(&w, dt, None);
+            frame += 1;
+        }
+        for (i, c) in h.cars.iter().enumerate() {
+            let (u, v) = (r[1 + i * 2].as_f64().unwrap(), r[2 + i * 2].as_f64().unwrap());
+            let len = h.lanes[c.lane as usize].len;
+            let mut du = (c.u - u).abs();
+            du = du.min((du - len).abs());
+            worst_u = worst_u.max(du);
+            worst_v = worst_v.max((c.v - v).abs());
+        }
+    }
+    // The cars the camera draws: which, and their transforms
+    let cam = &o["camera"];
+    let eye = ny_sim::math::V3 { x: f(&cam["pos"][0]), y: f(&cam["pos"][1]), z: f(&cam["pos"][2]) };
+    let ahead = ny_sim::math::V3 { x: f(&cam["fwd"][0]), y: f(&cam["fwd"][1]), z: f(&cam["fwd"][2]) };
+    let mut drawn = Vec::new();
+    h.drawn(&w, eye, ahead, &mut drawn);
+    let want = o["drawn"].as_array().unwrap();
+    assert_eq!(drawn.len(), want.len(), "cars drawn");
+    let mut worst_m: f32 = 0.0;
+    for (p, rec) in drawn.iter().zip(want) {
+        let r = rec.as_array().unwrap();
+        assert_eq!(p.car as i64, r[0].as_i64().unwrap(), "the same car in the same order");
+        // three.js's matrix (column-major) of Euler(pitch, yaw, 0, 'YXZ') at the place
+        let (sy, cy, sp, cp) = (p.yaw.sin(), p.yaw.cos(), p.pitch.sin(), p.pitch.cos());
+        let m = [cy, 0.0, -sy, 0.0, sy * sp, cp, cy * sp, 0.0, sy * cp, -sp, cy * cp, 0.0, p.x, p.y, p.z, 1.0];
+        for k in 0..16 {
+            let d = (m[k] - f(&r[1 + k])).abs();
+            worst_m = worst_m.max(if k >= 12 { d } else { d * 10.0 });
+        }
+    }
+    eprintln!("highway: {} cars; start {worst_start:.2e} m, after 15 s place {worst_u:.2e} m, speed {worst_v:.2e} m/s; {} drawn, transforms within {worst_m:.2e}", h.cars.len(), drawn.len());
+    assert!(worst_start < 1e-6, "start {worst_start}");
+    assert!(worst_u < 0.01, "place {worst_u}");
+    assert!(worst_v < 0.001, "speed {worst_v}");
+    assert!(worst_m < 0.01, "transforms {worst_m}");
+}
+
+/// Pedestrians on the sidewalks against the reference's (`walkersRun`): from where each was first seen on a track,
+/// its place along it, speed and way every frame it stayed there (the walk alone: turning round at the ends).
+#[test]
+fn pedestrians_walk_as_the_reference() {
+    use ny_sim::crowd::{Crowd, Pedestrian, Track};
+    let o = need!(oracle("walkers.json"), "oracle/walkers.json");
+    let dt = o["dt"].as_f64().unwrap() as f32;
+    let (mut worst_t, mut worst_v, mut turns, mut frames) = (0.0f32, 0.0f32, 0, 0);
+    for run in o["runs"].as_array().unwrap() {
+        let s = &run["start"];
+        let mut p = Pedestrian {
+            placed: true,
+            track: Track { ax: f(&s["ax"]), az: f(&s["az"]), ux: f(&s["ux"]), uz: f(&s["uz"]), len: f(&s["len"]), node: -1, side: 0, line: 0.0 },
+            t: f(&s["t"]),
+            dir: f(&s["dir"]),
+            v: f(&s["v"]),
+            pause: f(&s["pause"]),
+            speed: f(&s["speed"]),
+            ..Default::default()
+        };
+        let ts = run["t"].as_array().unwrap();
+        for rec in &ts[1..] {
+            let r = rec.as_array().unwrap();
+            let dir_was = p.dir;
+            Crowd::advance(&mut p, dt, false, true, f32::INFINITY);
+            if p.dir != dir_was {
+                turns += 1;
+            }
+            frames += 1;
+            assert_eq!(p.dir, f(&r[2]), "way at frame {frames} of person {}", run["ped"]);
+            worst_t = worst_t.max((p.t - f(&r[0])).abs());
+            worst_v = worst_v.max((p.v - f(&r[1])).abs());
+        }
+    }
+    eprintln!("walkers: {} runs, {frames} frames, {turns} turns; place within {worst_t:.2e} m, speed {worst_v:.2e} m/s", o["runs"].as_array().unwrap().len());
+    // (in floats against the reference's doubles: a step rounds by some 4 µm 100 m along a track, 1 200 steps by ~5 mm)
+    assert!(worst_t < 0.012, "place {worst_t}");
+    assert!(worst_v < 0.001, "speed {worst_v}");
+}

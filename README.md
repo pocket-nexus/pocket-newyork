@@ -10,7 +10,7 @@ The city is modelled once, as the reference's three.js scene that runs in a brow
 - **`crates/ny-cook`** is the scene compiler: SceneIR in, one pack out, for a device profile (`profiles/vita60.json`).
 - **`crates/ny-pack`** is the pack: tables, vertex layouts and sections shared by the compiler and the runtimes.
 - **`crates/ny-view`** is what a frame draws: the places of the pack at the level of detail their distance asks for.
-- **`crates/ny-sim`** is what moves, the same on every device: the reference's four ways through the city, its cameras, its street names, its signals and its traffic, compared against the reference itself.
+- **`crates/ny-sim`** is what moves, the same on every device: the reference's four ways through the city, its cameras, its street names, its signals, its traffic, its pedestrians and its highway's cars, compared against the reference itself.
 - **`ui/`** is the interface: one PocketJS app drawn over the city. **`crates/ny-interface`** is the renderer's side of it and the flow around play (the title, play, the menu).
 - **`vita/`** draws a pack on the PS Vita through GXM.
 
@@ -62,7 +62,7 @@ The reference imports three.js from its dev branch on a CDN; `THREE_COMMIT` in `
 - **The levels of detail** follow `ny_view::select`: regions past the far reach (7 km, where the hour's haze has the city) are not drawn, regions past the mid reach draw their far level, blocks past the near reach their mid level, cells within it their near level and, within the detail reach, their small things. A governor draws the reaches in when a frame draws more than its triangle budget or waits on the GPU.
 - **Shadows** come from `HMAP`. A thread reads a 2 km window of it around the eye from the pack and sweeps it for the hour's sun (`ny_sim::shadow::sweep`, from Pocket Tokyo): each cell gets the height below which a point over it is in shadow. Every program compares its own height with the window's, read a little way out along its normal so that a wall does not read its own building's top.
 - **The programs** light in linear light with the hour's read-back light and end with its tone curve, then lay the haze over: the reference's aerial fog, its colour by the draw's direction and its density by the draw's height. Surfaces reflect the sky by their roughness and metalness (Schlick's Fresnel as roughness damps it), and the city's dim light where a reflection meets buildings across the street. Walls read their facade page and, by night, the page of what their rooms emit. Ground reads its picture over world x and z. Geometry coloured by vertex takes its probed colour, and its emission by night. Instanced shapes take their instance's matrix and tint from a second stream; trees cut their cards where the leaves' picture is under half. The sky is a dome under the hour's panorama.
-- **What moves** is drawn from the game each frame: the traffic's cars by kind, painted by their tint, those in view and within the middle distance, and the player's vehicle.
+- **What moves** is drawn from the game each frame: the traffic's cars by kind, painted by their tint, those in view and within the middle distance; the sidewalks' people (the nearest 48 within 100 m, the near figure within 25 m) at their heights and in their coats; the highway's cars; and the player's vehicle.
 - **The interface** is the PocketJS guest of `ui/`, drawn over the city.
 - **The Pocket3D title card** plays first.
 
@@ -84,7 +84,7 @@ Beside the reference from the same eye (`bun tools/newyork.ts look --eye x,y,z -
 - **Night streets are dark.** The reference lights them with pooled spot and point lights (88 cd cobra heads, 25 m); the lamps' pools on the ground here come out far weaker under the linear light and need calibrating against it, and the lamps' light on trees and cars is missing.
 - **Leaves** are brighter than the reference's: its crowns shadow themselves through its shadow map, and these do not.
 - **Roofs** past the near level are flat and bluish: the reference draws rooftop plant (water towers, bulkheads, chillers) within 560 m, and here only the near level carries it.
-- **Not drawn yet:** pedestrians, the highway's traffic, the steam.
+- **Not drawn yet:** the steam, the highway's lamp flares by night.
 - **Not done:** the Pocket3D Demo row, LiveArea pictures, a package.
 
 ## The interface

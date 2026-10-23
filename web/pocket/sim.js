@@ -1,10 +1,12 @@
 // What moves needs from the reference, as the reference has it after it is built: the colliders its builders made,
-// the ground the controllers stand on, the island's shore, the road network the traffic drives, the names the
-// location label reads, the signal timing, the cameras and the four entities as they start. Writes `sim.json`.
+// the ground the controllers stand on, the island's shore, the road network the traffic drives, where its
+// pedestrians may walk, the highway's lanes, the names the location label reads, the signal timing, the cameras and
+// the four entities as they start. Writes `sim.json`.
 //
-// Then the oracle: the reference's own controllers, cameras, location label and signals driven headless by fixed
-// scripts, recorded to `oracle/*.json` for `cargo test -p ny-sim` to replay through the port.
+// Then the oracle: the reference's own controllers, cameras, location label, signals, highway traffic and sidewalk
+// walkers driven headless, recorded to `oracle/*.json` for `cargo test -p ny-sim` to replay through the port.
 
+import * as THREE from 'three/webgpu';
 import { log, put } from './util.js';
 
 const round = (x, k = 1e4) => Math.round(x * k) / k;
@@ -66,6 +68,84 @@ function network(net) {
   };
 }
 
+/** Steps of the offsets and lines below: the reference draws them from Math.random, the port from these. */
+const OFF_STEPS = 53; // sidewalk offsets half + 1.4 + k × 0.05, k = 0..52 (traffic.js sidewalkTrack: + 0..2.6)
+const LINE_STEPS = 12; // crosswalk lines 0.5 + k × 0.05, k = 0..11 (crosswalkTrack: + 0..0.55)
+
+/** Where the reference's pedestrians may walk, as its own tests find it (traffic.js sidewalkTrack and
+ *  crosswalkTrack, over road-network.js walkable and onSidewalk and city-config.js blockAt): per edge, which offsets
+ *  to its right (`walk[0]`) and left (`walk[1]`) make a sidewalk track, bit k for half + 1.4 + k × 0.05; per
+ *  signalized intersection and side 0..3, the road its crosswalk spans and which lines make one, bit k for
+ *  0.5 + k × 0.05 on the side's own sign and bit 12 + k on the other. With what the vehicles need of the crosswalks:
+ *  the sides an edge arrives and leaves over and the lateral axis lanes meet them along. */
+function walks(net) {
+  const { walkable, onSidewalk } = net;
+  const { blockAt } = window.NYC;
+  const walkable2D = (ax, az, bx, bz) => walkable(Math.min(ax, bx) - 0.4, Math.max(ax, bx) + 0.4, Math.min(az, bz) - 0.4, Math.max(az, bz) + 0.4);
+  const edgeId = new Map(net.edges.map((e, i) => [e, i]));
+  const sidewalk = (e, off) => {
+    const ax = e.sx + e.rx * off;
+    const az = e.sz + e.rz * off;
+    if (e.general) {
+      for (let s = 0; s < e.len + 3; s += 3) {
+        const t = Math.min(s, e.len);
+        const x = ax + e.dx * t;
+        const z = az + e.dz * t;
+        if (!walkable(x - 0.4, x + 0.4, z - 0.4, z + 0.4) || !blockAt(x, z)) return false;
+      }
+      return true;
+    }
+    if (!walkable2D(ax, az, ax + e.dx * e.len, az + e.dz * e.len)) return false;
+    for (let s = 0; s < e.len + 3; s += 3) {
+      const t = Math.min(s, e.len);
+      if (!onSidewalk(ax + e.dx * t, az + e.dz * t)) return false;
+    }
+    return true;
+  };
+  const edges = net.edges.map((e) => ({
+    half: e.half,
+    general: !!e.general,
+    inSide: e.inSide,
+    outSide: e.outSide,
+    clx: e.clx,
+    clz: e.clz,
+    walk: [1, -1].map((sign) => {
+      let bits = 0;
+      for (let k = 0; k < OFF_STEPS; k++) if (sidewalk(e, sign * (e.half + 1.4 + k * 0.05))) bits += 2 ** k;
+      return bits;
+    })
+  }));
+  const nodes = net.nodes.map((n) => {
+    if (!n.signal) return null;
+    return [0, 1, 2, 3].map((side) => {
+      const road = n.road?.[side];
+      if (!road) return null;
+      const acrossAvenue = side >= 2;
+      const sign = side % 2 === 0 ? 1 : -1;
+      let bits = 0;
+      for (const [b, ls] of [[0, sign], [LINE_STEPS, -sign]]) {
+        for (let k = 0; k < LINE_STEPS; k++) {
+          const line = ls * (0.5 + k * 0.05);
+          const ax = acrossAvenue ? road.x0 - road.half - 2 : n.x + sign * (n.hx + 1.25) + line;
+          const az = acrossAvenue ? n.z + sign * (n.hz + 1.25) + line : road.z0 - road.half - 2;
+          const len = 2 * road.half + 4;
+          const ux = acrossAvenue ? 1 : 0;
+          const uz = acrossAvenue ? 0 : 1;
+          const ok = walkable2D(ax, az, ax + ux * len, az + uz * len) && onSidewalk(ax, az) && onSidewalk(ax + ux * len, az + uz * len);
+          if (ok) bits += 2 ** (b + k);
+        }
+      }
+      return { road: edgeId.get(road), across: acrossAvenue ? road.x0 : road.z0, half: road.half, lines: bits };
+    });
+  });
+  return { offSteps: OFF_STEPS, lineSteps: LINE_STEPS, edges, nodes };
+}
+
+/** The highway's lanes (city-grid.js highwayLanes, as createHighwayTraffic took them): centre-line points and speed. */
+function highway(h) {
+  return h.lanes.map((l) => ({ speed: l.speed, pts: l.pts.flatMap((p) => [p.x, p.y, p.z]) }));
+}
+
 function entities(controllers) {
   const out = {};
   for (const [mode, e] of Object.entries(controllers.entities)) {
@@ -83,6 +163,96 @@ function entities(controllers) {
 }
 
 // ---------------------------------------------------------------------------------------------------- the oracle
+
+/** The highway's cars from the start (createHighwayTraffic's seeded fleet), stepped with no player for `frames`:
+ *  every car's kind, paint, place and speed at the start and every tenth frame; then, from a camera over the lanes,
+ *  the transforms the reference gives the cars it draws, in its order. */
+function highwayRun(app) {
+  const h = app.highway;
+  const dt = 1 / 60;
+  const kinds = ['taxi', 'sedan', 'suv'];
+  const start = h.cars.map((c) => [h.lanes.indexOf(c.lane), kinds.indexOf(c.kind), ...c.col, c.u, c.v]);
+  const camera = new THREE.PerspectiveCamera(55, 960 / 544, 0.5, 30000);
+  camera.position.set(-2000, 120, 1800);
+  camera.lookAt(-2100, 0, 1500);
+  camera.updateMatrixWorld();
+  const frames = [];
+  for (let f = 1; f <= 900; f++) {
+    h.update(dt, camera, null, 'helicopter');
+    if (f % 10 === 0) frames.push([f, ...h.cars.flatMap((c) => [round(c.u, 1e5), round(c.v, 1e5)])]);
+  }
+  // Which car got which instance: the reference's order and culling (traffic.js update, step 2), read back from its
+  // meshes' matrices.
+  const group = app.scene.getObjectByName('HighwayTraffic');
+  const meshes = group.children.filter((o) => o.isInstancedMesh);
+  const fwd = new THREE.Vector3();
+  camera.getWorldDirection(fwd);
+  const used = new Map(meshes.map((m) => [m, 0]));
+  const drawn = [];
+  const kindMeshes = Object.fromEntries(kinds.map((k, i) => [k, meshes.slice(i * 3, i * 3 + 3)]));
+  const m4 = new THREE.Matrix4();
+  for (const [i, c] of h.cars.entries()) {
+    const lane = c.lane;
+    const seg = c.seg;
+    const a = lane.pts[seg], b = lane.pts[seg + 1];
+    const segLen = lane.cum[seg + 1] - lane.cum[seg];
+    const t = Math.min(1, Math.max(0, (c.u - lane.cum[seg]) / segLen));
+    const x = a.x + (b.x - a.x) * t, z = a.z + (b.z - a.z) * t;
+    const toEnd = lane.len - c.u;
+    const dip = Math.min(c.u, toEnd);
+    const e = Math.min(1, Math.max(0, dip / 32));
+    const y = a.y + (b.y - a.y) * t - 2.4 * (1 - e * e * (3 - 2 * e));
+    const dx = x - camera.position.x, dy = y - camera.position.y, dz = z - camera.position.z;
+    const d2 = dx * dx + dy * dy + dz * dz;
+    if (d2 > 1600 * 1600) continue;
+    const lod = d2 < 170 * 170 ? 0 : d2 < 450 * 450 ? 1 : 2;
+    if (lod > 0 && dx * fwd.x + dz * fwd.z < -40) continue;
+    if (y < -3.6) continue;
+    const mesh = kindMeshes[c.kind][lod];
+    const slot = used.get(mesh);
+    used.set(mesh, slot + 1);
+    mesh.getMatrixAt(slot, m4);
+    drawn.push([i, ...m4.elements.map((v) => round(v, 1e5))]);
+  }
+  return { dt, start, frames, camera: { pos: camera.position.toArray(), fwd: fwd.toArray() }, drawn };
+}
+
+/** The reference's pedestrians around the start for `frames` with the camera fixed: those on sidewalks (not
+ *  crosswalks), from the first frame on their track to the last, as they walk it (traffic.js walk). */
+function walkersRun(app) {
+  const t = app.traffic;
+  const dt = 1 / 60;
+  const camera = new THREE.PerspectiveCamera(56, 960 / 544, 0.5, 30000);
+  camera.position.set(3.6, 2.6, 403.7);
+  camera.lookAt(3.6, 1.5, 415.8);
+  camera.updateMatrixWorld();
+  const focus = camera.position;
+  // A run: one pedestrian on one sidewalk track, from the first frame it is seen there to the last.
+  const current = new Map();
+  const runs = [];
+  let elapsed = 3.0;
+  for (let f = 0; f < 1200; f++) {
+    elapsed += dt;
+    t.update(dt, elapsed, focus, null, 'helicopter', camera);
+    for (const [i, p] of t.peds.entries()) {
+      const key = p.placed && !p.node ? `${p.ax},${p.az},${p.len}` : null;
+      let r = current.get(i);
+      if (r && r.key !== key) {
+        runs.push(r);
+        current.delete(i);
+        r = null;
+      }
+      if (!key) continue;
+      if (!r) {
+        r = { key, ped: i, from: f, start: { ax: p.ax, az: p.az, ux: p.ux, uz: p.uz, len: p.len, t: p.t, dir: p.dir, v: p.v, pause: p.pause, speed: p.speed }, t: [] };
+        current.set(i, r);
+      }
+      r.t.push([round(p.t, 1e5), round(p.v, 1e5), p.dir]);
+    }
+  }
+  runs.push(...current.values());
+  return { dt, runs: runs.filter((r) => r.t.length > 120).map(({ key, ...r }) => r) };
+}
 
 const KEYS = ['forward', 'backward', 'left', 'right', 'up', 'down', 'boost'];
 
@@ -208,10 +378,12 @@ export async function exportSim(app) {
     // The names getLocationLabel writes itself (city-config.js), besides the roads', streets' and landmarks'
     specials: ['Central Park', 'Hudson River Waterfront', 'East River Waterfront', 'New York Harbor'],
     entities: ents,
-    network: network(app.traffic.network)
+    network: network(app.traffic.network),
+    walks: walks(app.traffic.network),
+    highway: highway(app.highway)
   };
   await put('sim.json', JSON.stringify(sim));
-  log(`sim: ${sim.colliders.count} colliders, ${sim.blocks.length} blocks, ${sim.roads.length} roads, ${sim.network.nodes.length} nodes, ${sim.network.edges.length} edges`);
+  log(`sim: ${sim.colliders.count} colliders, ${sim.blocks.length} blocks, ${sim.roads.length} roads, ${sim.network.nodes.length} nodes, ${sim.network.edges.length} edges, ${sim.highway.length} highway lanes`);
 
   // The oracle runs on the reference's own objects; it moves the entities, so it comes after the record above.
   const runs = [];
@@ -223,5 +395,7 @@ export async function exportSim(app) {
   await put('oracle/labels.json', JSON.stringify(labels()));
   await put('oracle/signals.json', JSON.stringify(signals()));
   await put('oracle/teleports.json', JSON.stringify(teleports(app)));
+  await put('oracle/highway.json', JSON.stringify(highwayRun(app)));
+  await put('oracle/walkers.json', JSON.stringify(walkersRun(app)));
   log(`oracle: ${runs.length} controller runs`);
 }

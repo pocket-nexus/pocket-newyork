@@ -6,6 +6,8 @@
 use crate::camera::{Cameras, CHASE};
 use crate::math::*;
 use crate::player::{Keys, Players};
+use crate::crowd::{Crowd, Pedestrian};
+use crate::highway::{Highway, HighwayPose, PlayerOnRoad};
 use crate::traffic::{PlayerTraffic, Sight, Traffic, Vehicle};
 use crate::world::World;
 use crate::{Hour, Mode};
@@ -80,7 +82,10 @@ pub struct Game {
     pub players: Players,
     pub cameras: Cameras,
     pub traffic: Traffic,
-    /// Cars on the streets (a device may turn them off).
+    /// The sidewalks' pedestrians, and the highway's cars.
+    pub crowd: Crowd,
+    pub highway: Highway,
+    /// Cars, people and the highway's cars (a device may turn them off).
     pub traffic_on: bool,
 }
 
@@ -95,9 +100,11 @@ impl Game {
     pub fn with_world(world: World) -> Game {
         let players = Players::new(&world);
         let traffic = Traffic::new(&world);
+        let crowd = Crowd::new(&world);
+        let highway = Highway::new(&world);
         let mut cameras = Cameras::default();
         cameras.set_preset(&world, CHASE, true);
-        Game { mode: Mode::Drive, hour: Hour::Golden, camera: CHASE, clock: 0.0, world, players, cameras, traffic, traffic_on: true }
+        Game { mode: Mode::Drive, hour: Hour::Golden, camera: CHASE, clock: 0.0, world, players, cameras, traffic, crowd, highway, traffic_on: true }
     }
 
     /// `selectMode`: the player moves the other entity, and a scenic camera hands over to the chase camera.
@@ -177,6 +184,9 @@ impl Game {
             let sight = Sight { eye: v.eye, dir: (v.look - v.eye).normalize(), half_fov };
             let focus = [self.cameras.pos.x, self.cameras.pos.z];
             self.traffic.step(&self.world, dt, self.clock, focus, &sight, &player);
+            self.crowd.step(&self.world, &mut self.traffic, dt, self.clock, focus, &sight);
+            let on_road = PlayerOnRoad { x: body.pos.x, y: body.pos.y, z: body.pos.z, vx, vz };
+            self.highway.step(&self.world, dt, if self.mode == Mode::Fly { None } else { Some(&on_road) });
             // The player is pushed off a car it ran into, and loses most of its speed
             if player.active {
                 let b = self.players.body_mut(self.mode);
@@ -227,6 +237,18 @@ impl Game {
     /// The cars and buses, placed or not (`Vehicle::placed`).
     pub fn vehicles(&self) -> &[Vehicle] {
         &self.traffic.vehicles
+    }
+
+    /// The pedestrians, placed or not (`Pedestrian::placed`).
+    pub fn pedestrians(&self) -> &[Pedestrian] {
+        &self.crowd.peds
+    }
+
+    /// The highway's cars the camera draws this frame, nearest level of detail first in the reference's order
+    /// (`Highway::drawn`).
+    pub fn highway_cars(&self, out: &mut alloc::vec::Vec<HighwayPose>) {
+        let v = self.view();
+        self.highway.drawn(&self.world, v.eye, (v.look - v.eye).normalize(), out);
     }
 
     /// The taxi's last knock against a building hard enough to throw sparks, once: x, z, the push's normal (x, z)

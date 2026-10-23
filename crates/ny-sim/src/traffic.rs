@@ -4,9 +4,14 @@
 //! that a car enters an intersection only when it can clear it and no crossing road holds the box, and its habit of
 //! moving cars only where the camera cannot see them.
 //!
-//! Left out: lane changes (a car keeps its lane and turns where its lane may), pedestrians and the crosswalks they
-//! hold, the buses' tail swing, the yielding of a left turn to a queue across, sparks. A car stops for the player
-//! in its lane; the player is pushed off a car it drives into.
+//! The crosswalks are held both ways, as the reference holds them: a vehicle crossing one (or committed to) keeps
+//! the pedestrians (`crowd`) at its curb, and a vehicle enters an intersection only when nobody on the crosswalks it
+//! passes, on its way in and on its way out, will be in its way (`pedestrianOn`). A pack without the walk tables
+//! has neither.
+//!
+//! Left out: lane changes (a car keeps its lane and turns where its lane may), waiting inside the intersection to
+//! turn (a turning car waits at its line instead), the buses' tail swing, the yielding of a left turn to a queue
+//! across, sparks. A car stops for the player in its lane; the player is pushed off a car it drives into.
 
 use crate::math::*;
 use crate::signal::{Phase, Timing};
@@ -306,6 +311,19 @@ impl Sight {
     }
 }
 
+/// A pedestrian on a crosswalk, or waiting at its curb, as the vehicles see it (traffic.js `n.walkers`): the
+/// intersection, the side of it, where along the crosswalk (x across an avenue, z across a street), which way it
+/// walks, how fast it walks, whether it waits.
+#[derive(Clone, Copy, Debug)]
+pub struct Walker {
+    pub node: u32,
+    pub side: u8,
+    pub coord: f32,
+    pub dir: f32,
+    pub speed: f32,
+    pub waiting: bool,
+}
+
 #[derive(Clone, Copy)]
 struct Entry {
     edge: u32,
@@ -327,6 +345,10 @@ pub struct Traffic {
     occ: Vec<Entry>,
     /// Intersections whose box a road holds this frame: (node, group).
     boxes: Vec<(u32, u32)>,
+    /// Crosswalks vehicles cross, or are committed to, this frame: (node, side).
+    crossing: Vec<(u32, u8)>,
+    /// Pedestrians on the crosswalks, and at their curbs to step off: the crowd's, from its last frame.
+    pub walkers: Vec<Walker>,
     rng: u32,
 }
 
@@ -367,6 +389,8 @@ impl Traffic {
             near_edges: Vec::new(),
             occ: Vec::new(),
             boxes: Vec::new(),
+            crossing: Vec::new(),
+            walkers: Vec::new(),
             rng,
         }
     }
@@ -447,6 +471,40 @@ impl Traffic {
     fn build_occupancy(&mut self, world: &World) {
         self.occ.clear();
         self.boxes.clear();
+        self.crossing.clear();
+        // The crosswalks they hold (`claim`, `cross`): on the way in until the tail is past it, on the way out once
+        // committed, and the one behind while the tail is still over it.
+        if !world.walk_edges.is_empty() {
+            for v in &self.vehicles {
+                if v.edge < 0 {
+                    continue;
+                }
+                let e = &world.edges[v.edge as usize];
+                let we = &world.walk_edges[v.edge as usize];
+                let out = |m: i32| if m >= 0 { Some(world.walk_edges[world.moves[m as usize].to as usize].out_side) } else { None };
+                match &v.conn {
+                    None => {
+                        if v.committed {
+                            self.crossing.push((e.to, we.in_side));
+                            if let Some(side) = out(v.mov) {
+                                self.crossing.push((e.to, side));
+                            }
+                        }
+                        if v.s < v.half {
+                            self.crossing.push((e.from, we.out_side));
+                        }
+                    }
+                    Some(_) => {
+                        if v.cs < v.half + 2.5 {
+                            self.crossing.push((e.to, we.in_side));
+                        }
+                        if let Some(side) = out(v.mov) {
+                            self.crossing.push((e.to, side));
+                        }
+                    }
+                }
+            }
+        }
         for (i, v) in self.vehicles.iter().enumerate() {
             if v.edge < 0 {
                 continue;
@@ -508,7 +566,53 @@ impl Traffic {
         v.stop_at(d, 1.0)
     }
 
-    /// May v cross the intersection ahead (`mayEnter`, without the pedestrians and the queue across)?
+    /// Where lane `i` of edge `e` meets a crosswalk, along it (`laneCoord`).
+    fn lane_coord(world: &World, e: u32, i: usize) -> f32 {
+        let ee = &world.edges[e as usize];
+        let we = &world.walk_edges[e as usize];
+        let o = Self::lane_offset(world, ee, i);
+        (ee.sx + ee.rx * o) * we.clx + (ee.sz + ee.rz * o) * we.clz
+    }
+
+    /// Seconds v takes to cover `dist` metres from now, speeding up from rest if it has to (`timeTo`).
+    fn time_to(v: &Vehicle, dist: f32) -> f32 {
+        dist / v.speed.max(sqrtf((v.driver.a * dist / 2.0).max(0.0))).max(0.1)
+    }
+
+    /// Will anyone on crosswalk `side` of `node` be within reach of the lane meeting it at `coord` between `t0` and
+    /// `t1` seconds from now? Unless `on_it`, so is anyone waiting at the curb to step off (`pedestrianOn`).
+    pub fn pedestrian_on(&self, node: u32, side: u8, coord: f32, t0: f32, t1: f32, on_it: bool) -> bool {
+        self.walkers.iter().any(|p| {
+            if p.node != node || p.side != side || (on_it && p.waiting) {
+                return false;
+            }
+            let to_go = (coord - p.coord) * p.dir;
+            p.waiting || ((to_go + 2.6) / p.speed > t0 && (to_go - 2.6) / p.speed < t1)
+        })
+    }
+
+    /// Does a vehicle cross (or is committed to crossing) crosswalk `side` of `node` this frame?
+    pub fn crossing_at(&self, node: u32, side: u8) -> bool {
+        self.crossing.iter().any(|&(n, s)| n == node && s == side)
+    }
+
+    /// Can every vehicle leading a lane of `edge` towards its intersection still stop short of it (traffic.js
+    /// `mayCross`: `leadOf` and `canStop(lead, e, true)`)?
+    pub fn approach_can_stop(&self, world: &World, edge: u32) -> bool {
+        let e = &world.edges[edge as usize];
+        for lane in 0..e.lane_count {
+            let lead = self.lane_list(edge, lane).iter().rev().find(|o| self.vehicles[o.v as usize].conn.is_none() || o.s < 0.0);
+            if let Some(o) = lead {
+                let v = &self.vehicles[o.v as usize];
+                if v.speed >= 0.5 && !v.can_stop_before(e.len - o.s - v.half) {
+                    return false;
+                }
+            }
+        }
+        true
+    }
+
+    /// May v cross the intersection ahead (`mayEnter`, without the queue across)?
     fn may_enter(&mut self, world: &World, v: usize, d: f32) -> bool {
         let car = self.vehicles[v];
         let e = world.edges[car.edge as usize];
@@ -552,6 +656,18 @@ impl Traffic {
                 }
             }
         }
+        // Nobody on the crosswalks while it passes over them, on the way in and on the way out
+        if !world.walk_edges.is_empty() {
+            let car = self.vehicles[v];
+            let c = Self::connector(world, car.edge as u32, car.lane, m.to, j as usize);
+            let (side_in, side_out) = (world.walk_edges[car.edge as usize].in_side, world.walk_edges[m.to as usize].out_side);
+            if self.pedestrian_on(e.to, side_in, Self::lane_coord(world, car.edge as u32, car.lane), 0.0, Self::time_to(&car, d + 2.5 + 2.0 * car.half), false) {
+                return false;
+            }
+            if self.pedestrian_on(e.to, side_out, Self::lane_coord(world, m.to, j as usize), Self::time_to(&car, d + c.len - 3.0), Self::time_to(&car, d + c.len + 2.0 * car.half), false) {
+                return false;
+            }
+        }
         // A free place to clear the intersection to
         let f = &world.edges[m.to as usize];
         let mut free = f.len - 1.0;
@@ -569,6 +685,11 @@ impl Traffic {
         if !stoppable {
             me.committed = true;
             self.boxes.push((e.to, e.group));
+            // At once, so pedestrians deciding later this frame know (`claim`)
+            if !world.walk_edges.is_empty() {
+                self.crossing.push((e.to, world.walk_edges[car.edge as usize].in_side));
+                self.crossing.push((e.to, world.walk_edges[m.to as usize].out_side));
+            }
         }
         true
     }
