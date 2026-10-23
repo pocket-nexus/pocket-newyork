@@ -7,6 +7,7 @@ mod facade;
 mod geom;
 mod ir;
 mod tex;
+mod sim;
 
 use bins::{Bin, Bins, Vx, DETAIL, FAR, MID, NEAR};
 use geom::{Aabb, M4};
@@ -392,6 +393,7 @@ fn main() {
     pw.add(pack::SPAN, pack::slice_bytes(&w.spans).to_vec());
     pw.add(pack::TEXS, pack::slice_bytes(&textures.entries).to_vec());
     pw.add(pack::TDAT, textures.data.clone());
+    sim::add(&mut pw, &ir_dir).unwrap_or_else(|e| panic!("{e}"));
     let bytes = pw.finish();
     std::fs::create_dir_all(out.parent().unwrap()).unwrap();
     std::fs::write(&out, &bytes).unwrap();

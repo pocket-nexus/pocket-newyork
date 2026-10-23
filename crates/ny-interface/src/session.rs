@@ -139,7 +139,7 @@ impl Session {
                 if self.mode == Mode::Title {
                     self.mode = Mode::Play;
                     game.set_mode(player);
-                    game.camera = self.follow_camera(self.play_camera);
+                    game.set_camera(self.follow_camera(self.play_camera));
                     self.rest();
                 }
             }
@@ -156,7 +156,7 @@ impl Session {
                 if self.mode == Mode::Title {
                     self.play_camera = self.follow_camera(self.play_camera);
                 } else {
-                    game.camera = self.follow_camera(game.camera);
+                    game.set_camera(self.follow_camera(game.camera));
                 }
             }
             Command::Hour(index) => game.set_hour(Hour::ALL[(index as usize).min(Hour::ALL.len() - 1)]),
@@ -165,7 +165,7 @@ impl Session {
                     if self.mode == Mode::Title {
                         self.play_camera = index;
                     } else {
-                        game.camera = index;
+                        game.set_camera(index);
                     }
                 }
             }
@@ -176,7 +176,7 @@ impl Session {
                     if self.mode == Mode::Title {
                         self.play_camera = 0;
                     } else {
-                        game.camera = 0;
+                        game.set_camera(0);
                     }
                 }
             }
@@ -186,7 +186,7 @@ impl Session {
                 }
                 self.mode = Mode::Title;
                 if let Some(camera) = self.title_camera {
-                    game.camera = camera;
+                    game.set_camera(camera);
                 }
                 self.rest();
             }
@@ -280,12 +280,12 @@ impl Session {
             if pressed & pad::MENU != 0 {
                 let at = Player::ALL.iter().position(|&m| m == game.mode).unwrap_or(0);
                 game.set_mode(Player::ALL[(at + 1) % Player::ALL.len()]);
-                game.camera = self.follow_camera(game.camera);
+                game.set_camera(self.follow_camera(game.camera));
             }
         }
         if self.mode == Mode::Title {
             if let Some(camera) = self.title_camera {
-                game.camera = camera;
+                game.set_camera(camera);
             }
         }
         if self.mode == Mode::Play {
@@ -295,7 +295,7 @@ impl Session {
                 game.set_hour(Hour::ALL[(game.hour.index() as i32 + step).rem_euclid(hours) as usize]);
             }
             if pressed & pad::CAMERA != 0 && self.cameras > 0 {
-                game.camera = (game.camera + 1) % self.cameras;
+                game.set_camera((game.camera + 1) % self.cameras);
             }
         }
         let input = self.input(pad, dt);

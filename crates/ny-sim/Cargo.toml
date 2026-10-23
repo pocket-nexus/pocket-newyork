@@ -13,3 +13,6 @@ std = ["ny-pack/std"]
 [dependencies]
 libm = "0.2"
 ny-pack = { path = "../ny-pack", default-features = false }
+
+[dev-dependencies]
+serde_json = "1"

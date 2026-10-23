@@ -32,6 +32,8 @@
 
 extern crate alloc;
 
+pub mod sim;
+
 use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;

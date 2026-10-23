@@ -311,6 +311,7 @@ version = "0.1.0"
 dependencies = [
  "libm",
  "ny-pack",
+ "serde_json",
 ]
 
 [[package]]

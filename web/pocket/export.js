@@ -19,6 +19,7 @@ import { exportScene } from './scene.js';
 import { probe } from './probe.js';
 import { exportWorld } from './world.js';
 import { bake } from './bake.js';
+import { exportSim } from './sim.js';
 
 const params = new URLSearchParams(location.search);
 const ONLY = params.get('only');
@@ -148,6 +149,7 @@ async function main() {
   if (!ONLY || ONLY === 'world') await exportWorld(app);
   if (!ONLY || ONLY === 'bake') await bake(app);
   if (!ONLY || ONLY === 'map') await (await import('./map.js')).exportMap(app);
+  if (!ONLY || ONLY === 'sim') await exportSim(app);
   if (!ONLY || ONLY === 'scene' || ONLY === 'probe') {
     const exported = await exportScene(app, ONLY !== 'probe');
     if (!ONLY || ONLY === 'probe') await probe(app, exported);

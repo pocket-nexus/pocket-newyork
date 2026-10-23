@@ -2,8 +2,19 @@
 //!
 //! The reference is a city to go through four ways (`Mode`): on foot, in a taxi, on a bicycle and in a helicopter
 //! (its controllers.js), seen through its cameras (cameras.js), under one of its four hours (lighting.js), with
-//! traffic on its road network (traffic.js). A device steps a `Game` once a frame with the pad as an `Input`, and
-//! draws the city from `Game::view`. What the interface shows of it is `Game::readout`.
+//! traffic on its road network (traffic.js). A device builds a `World` from the pack's sections (`ny_pack::sim`),
+//! steps a `Game` once a frame with the pad as an `Input`, and draws the city from `Game::view`, the four entities
+//! from `Game::players` and the traffic from `Game::vehicles`. What the interface shows of it is `Game::readout`
+//! and `Game::label`.
+//!
+//! | Module | The reference's |
+//! | --- | --- |
+//! | `player` | controllers.js: the four entities, their collision against the colliders, teleports |
+//! | `camera` | cameras.js: chase, action, pov and the scenic views |
+//! | `location` | city-config.js `getLocationLabel`, `nearestRoads` |
+//! | `signal` | city-config.js `signalPhase`, `walkSignal` |
+//! | `traffic` | traffic.js and road-network.js, without lane changes and pedestrians |
+//! | `world` | what they read: colliders, ground, shore, names, the road network |
 //!
 //! The crate builds without `std` (`default-features = false`): `core`, `alloc` and `libm`.
 
@@ -11,10 +22,17 @@
 
 extern crate alloc;
 
+pub mod camera;
 pub mod game;
+pub mod location;
 pub mod math;
+pub mod player;
+pub mod signal;
+pub mod traffic;
+pub mod world;
 
 pub use game::{Game, Input, Location, Readout, View};
+pub use world::World;
 
 /// How the player goes through the city: the reference's four entities.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
