@@ -5,7 +5,7 @@
 //   view.html?pack=vita60/city.pack&eye=x,y,z&at=x,y,z&fov=56&hour=golden&near=250&mid=1500
 
 import * as THREE from 'three/webgpu';
-import { attribute, dot, float, max, mix, normalize, normalWorld, pow, step, texture, uniform, vec2, vec3, vec4 } from 'three/tsl';
+import { attribute, dot, float, max, mix, normalize, normalWorld, positionWorld, pow, step, texture, uniform, vec2, vec3, vec4 } from 'three/tsl';
 
 const q = new URLSearchParams(location.search);
 const info = document.getElementById('info');
@@ -92,10 +92,84 @@ function solidMaterial(open, instanced = false) {
   return m;
 }
 
-function geometryOf(pack, b) {
-  const { dv, sec } = pack;
+/** Where an item's streams are: the pack's own sections, or its cell's record of NEAR. */
+function streamsOf(pack, cell) {
+  const { sec } = pack;
+  if (cell === undefined || cell === 0xffffffff) return { sol: sec('VSOL').off, wal: sec('VWAL').off, gnd: sec('VGND').off, idx: sec('IDX0').off, inst: sec('INST').off };
+  const nc = sec('NCEL').off + cell * 32;
+  const dv = pack.dv;
+  const offset = dv.getUint32(nc, true);
+  const parts = [0, 1, 2, 3, 4].map((k) => dv.getUint32(nc + 8 + k * 4, true));
+  const base = sec('NEAR').off + offset;
+  const starts = [];
+  let o = 0;
+  for (let k = 0; k < 5; k++) {
+    starts.push(base + o);
+    o = (o + parts[k] + 15) & ~15;
+  }
+  return { sol: starts[0], wal: starts[1], gnd: starts[2], idx: starts[3], inst: starts[4] };
+}
+
+function indices(pack, st, b) {
+  return new Uint16Array(pack.buf.slice(st.idx + b.idxFirst * 2, st.idx + (b.idxFirst + b.idxCount) * 2));
+}
+
+function groundGeometryOf(pack, b, st) {
+  const { dv } = pack;
+  const n = b.vtxCount;
+  const pos = new Float32Array(n * 3), nrm = new Float32Array(n * 3), tint = new Uint8Array(n * 4);
+  for (let i = 0; i < n; i++) {
+    const at = st.gnd + (b.vtxFirst + i) * 16;
+    for (let k = 0; k < 3; k++) {
+      pos[i * 3 + k] = b.origin[k] + (dv.getUint16(at + k * 2, true) / 65535) * b.span[k];
+      nrm[i * 3 + k] = dv.getInt8(at + 6 + k) / 127;
+    }
+    for (let k = 0; k < 4; k++) tint[i * 4 + k] = dv.getUint8(at + 10 + k);
+  }
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+  g.setAttribute('normal', new THREE.BufferAttribute(nrm, 3));
+  g.setAttribute('tint', new THREE.BufferAttribute(tint, 4, true));
+  g.setIndex(new THREE.BufferAttribute(indices(pack, st, b), 1));
+  return g;
+}
+
+const groundMaterials = new Map();
+function groundMaterial(pack, tex) {
+  if (groundMaterials.has(tex)) return groundMaterials.get(tex);
+  const m = new THREE.MeshBasicNodeMaterial();
+  const n = normalize(normalWorld);
+  const uv = positionWorld.xz.div(pack.texs[tex].metres);
+  const lit = mix(U.ground, U.sky, n.y.mul(0.5).add(0.5)).add(U.sun.mul(max(dot(n, U.sunDir), 0.0)));
+  m.colorNode = texture(textureOf(pack, tex), uv).rgb.mul(pow(attribute('tint', 'vec4').rgb, vec3(1)).mul(2)).mul(lit);
+  m.fog = true;
+  groundMaterials.set(tex, m);
+  return m;
+}
+
+const leafMaterials = new Map();
+function leafMaterial(pack, tex) {
+  if (leafMaterials.has(tex)) return leafMaterials.get(tex);
+  const m = new THREE.MeshBasicNodeMaterial();
+  const n = normalize(normalWorld);
+  const t = texture(textureOf(pack, tex), attribute('tuv', 'vec2'));
+  const bark = attribute('tint', 'vec4');
+  const leaf = bark.a;
+  const col = mix(bark.rgb, t.rgb.mul(attribute('itint', 'vec4').rgb.mul(2)), leaf);
+  const lit = mix(U.ground, U.sky, n.y.mul(0.5).add(0.5)).add(U.sun.mul(dot(n, U.sunDir).abs().mul(0.7).add(0.3)));
+  m.colorNode = pow(col, vec3(2.2)).mul(lit);
+  m.opacityNode = mix(float(1), t.a, leaf);
+  m.alphaTest = 0.5;
+  m.side = THREE.DoubleSide;
+  m.fog = true;
+  leafMaterials.set(tex, m);
+  return m;
+}
+
+function geometryOf(pack, b, st = streamsOf(pack)) {
+  const { dv } = pack;
   const stride = 20;
-  const s = sec('VSOL');
+  const s = { off: st.sol };
   const n = b.vtxCount;
   const pos = new Float32Array(n * 3);
   const nrm = new Float32Array(n * 3);
@@ -112,8 +186,7 @@ function geometryOf(pack, b) {
       glw[i * 4 + k] = dv.getUint8(at + 14 + k);
     }
   }
-  const is = sec('IDX0');
-  const idx = new Uint16Array(pack.buf.slice(is.off + b.idxFirst * 2, is.off + (b.idxFirst + b.idxCount) * 2));
+  const idx = indices(pack, st, b);
   const g = new THREE.BufferGeometry();
   g.setAttribute('position', new THREE.BufferAttribute(pos, 3));
   g.setAttribute('normal', new THREE.BufferAttribute(nrm, 3));
@@ -184,9 +257,9 @@ function wallMaterial(pack, tex) {
   return m;
 }
 
-function wallGeometryOf(pack, b) {
-  const { dv, sec } = pack;
-  const s = sec('VWAL');
+function wallGeometryOf(pack, b, st = streamsOf(pack)) {
+  const { dv } = pack;
+  const s = { off: st.wal };
   const n = b.vtxCount;
   const pos = new Float32Array(n * 3);
   const nrm = new Float32Array(n * 3);
@@ -202,13 +275,12 @@ function wallGeometryOf(pack, b) {
     tuv[i * 2 + 1] = (dv.getInt16(at + 12, true) / 32767) * 64;
     for (let k = 0; k < 4; k++) tint[i * 4 + k] = dv.getUint8(at + 14 + k);
   }
-  const is = sec('IDX0');
   const g = new THREE.BufferGeometry();
   g.setAttribute('position', new THREE.BufferAttribute(pos, 3));
   g.setAttribute('normal', new THREE.BufferAttribute(nrm, 3));
   g.setAttribute('tuv', new THREE.BufferAttribute(tuv, 2));
   g.setAttribute('tint', new THREE.BufferAttribute(tint, 4, true));
-  g.setIndex(new THREE.BufferAttribute(new Uint16Array(pack.buf.slice(is.off + b.idxFirst * 2, is.off + (b.idxFirst + b.idxCount) * 2)), 1));
+  g.setIndex(new THREE.BufferAttribute(indices(pack, st, b), 1));
   return g;
 }
 
@@ -237,16 +309,16 @@ async function main() {
   camera.lookAt(new THREE.Vector3().fromArray(at.length === 3 ? at : v.slice(3, 6)));
   camera.updateMatrixWorld();
   const frustum = new THREE.Frustum().setFromProjectionMatrix(new THREE.Matrix4().multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse));
-  const reach = { detail: Number(q.get('detail') || 120), near: Number(q.get('near') || 250), mid: Number(q.get('mid') || 1500) };
+  const reach = { detail: Number(q.get('detail') || 110), near: Number(q.get('near') || 260), mid: Number(q.get('mid') || 1400), far: Number(q.get('far') || 7000) };
   const p = camera.position.toArray();
   const box = new THREE.Box3();
   const seen = (min, max) => frustum.intersectsBox(box.set(new THREE.Vector3(...min), new THREE.Vector3(...max)));
   const items = [];
   const counts = [0, 0, 0, 0];
   const spans = new Uint32Array(pack.buf, pack.sec('SPAN').off, pack.sec('SPAN').size / 4);
-  const whole = (b) => (b.kind === 4 || b.kind === 5 ? b.instCount : b.idxCount);
-  const all = (first, count) => {
-    for (let i = first; i < first + count; i++) if (whole(pack.batches[i]) > 0) items.push({ batch: i, from: 0, to: whole(pack.batches[i]) });
+  const whole = (b) => (b.kind >= 4 ? b.instCount : b.idxCount);
+  const all = (first, count, cell = 0xffffffff) => {
+    for (let i = first; i < first + count; i++) if (whole(pack.batches[i]) > 0) items.push({ batch: i, from: 0, to: whole(pack.batches[i]), cell });
   };
   const runs = (first, count, chosen) => {
     for (let i = first; i < first + count; i++) {
@@ -268,6 +340,7 @@ async function main() {
     const r = pack.regions[rz * city.regionsX + rx];
     const rmin = [city.x0 + rx * rw, y0, city.z0 + rz * rw], rmax = [rmin[0] + rw, y1, rmin[2] + rw];
     if (!seen(rmin, rmax)) continue;
+    if (dist(p, rmin, rmax) >= reach.far) continue;
     if (dist(p, rmin, rmax) >= reach.mid) {
       if (r.count) { counts[2]++; all(r.first, r.count); }
       continue;
@@ -280,6 +353,7 @@ async function main() {
       const bmin = [city.x0 + bx * bw, y0, city.z0 + bz * bw], bmax = [bmin[0] + bw, y1, bmin[2] + bw];
       if (!seen(bmin, bmax)) continue;
       const d = dist(p, bmin, bmax);
+      if (d >= reach.far) continue;
       if (d >= reach.mid) { farBlocks[j * rb + i] = true; anyFar = true; continue; }
       const block = pack.blocks[bz * city.blocksX + bx];
       if (d >= reach.near) {
@@ -296,9 +370,10 @@ async function main() {
         if (dc >= reach.near) { midCells[cj * bc + ci] = true; anyMid = true; continue; }
         const cell = pack.cells[cz * city.cellsX + cx];
         if (cell.count + cell.detail.count === 0 || !seen(cell.min, cell.max)) continue;
+        const cellIndex = cz * city.cellsX + cx;
         counts[0]++;
-        all(cell.first, cell.count);
-        if (dc < reach.detail && cell.detail.count) { counts[3]++; all(cell.detail.first, cell.detail.count); }
+        all(cell.first, cell.count, cellIndex);
+        if (dc < reach.detail && cell.detail.count) { counts[3]++; all(cell.detail.first, cell.detail.count, cellIndex); }
       }
       if (anyMid && block.count) { counts[1]++; runs(block.first, block.count, midCells); }
     }
@@ -310,19 +385,26 @@ async function main() {
   const geoms = new Map();
   const inst = pack.sec('INST');
   let tris = 0;
+  const byKind = {};
+  const byLevel = {};
   for (const it of items) {
     const b = pack.batches[it.batch];
+    const n = b.kind >= 4 ? (b.idxCount / 3) * (it.to - it.from) : (it.to - it.from) / 3;
+    byKind[b.kind] = (byKind[b.kind] ?? 0) + n;
+    const lvl = it.cell !== undefined && it.cell !== 0xffffffff ? 'cell' : 'resident';
+    byLevel[lvl] = (byLevel[lvl] ?? 0) + n;
     let mesh;
-    if (b.kind === 4 || b.kind === 5) {
-      const key = `${b.vtxFirst}:${b.idxFirst}`;
-      if (!shapes.has(key)) shapes.set(key, geometryOf(pack, b));
+    const st = streamsOf(pack, it.cell);
+    if (b.kind >= 4) {
+      const key = `${b.kind}:${b.vtxFirst}:${b.idxFirst}`;
+      if (!shapes.has(key)) shapes.set(key, b.kind === 6 ? wallGeometryOf(pack, b) : geometryOf(pack, b));
       const g = shapes.get(key).clone();
       const n = it.to - it.from;
       const tint = new Uint8Array(n * 4);
-      const im = new THREE.InstancedMesh(g, instMats[b.kind === 5 ? 1 : 0], n);
+      const im = new THREE.InstancedMesh(g, b.kind === 6 ? leafMaterial(pack, b.tex) : instMats[b.kind === 5 ? 1 : 0], n);
       const mm = new THREE.Matrix4();
       for (let k = 0; k < n; k++) {
-        const at = inst.off + (b.instFirst + it.from + k) * 52;
+        const at = st.inst + (b.instFirst + it.from + k) * 52;
         const r = (row, col) => pack.dv.getFloat32(at + (row * 4 + col) * 4, true);
         mm.set(r(0, 0), r(0, 1), r(0, 2), r(0, 3), r(1, 0), r(1, 1), r(1, 2), r(1, 3), r(2, 0), r(2, 1), r(2, 2), r(2, 3), 0, 0, 0, 1);
         im.setMatrixAt(k, mm);
@@ -332,12 +414,12 @@ async function main() {
       mesh = im;
       tris += (b.idxCount / 3) * n;
     } else {
-      if (!geoms.has(it.batch)) geoms.set(it.batch, b.kind === 0 ? wallGeometryOf(pack, b) : b.kind === 1 || b.kind === 2 ? geometryOf(pack, b) : null);
+      if (!geoms.has(it.batch)) geoms.set(it.batch, b.kind === 0 ? wallGeometryOf(pack, b, st) : b.kind === 3 ? groundGeometryOf(pack, b, st) : geometryOf(pack, b, st));
       const g0 = geoms.get(it.batch);
       if (!g0) continue;
       const g = g0.clone();
       g.setDrawRange(it.from, it.to - it.from);
-      mesh = new THREE.Mesh(g, b.kind === 0 ? wallMaterial(pack, b.tex) : mats[b.kind === 2 ? 1 : 0]);
+      mesh = new THREE.Mesh(g, b.kind === 0 ? wallMaterial(pack, b.tex) : b.kind === 3 ? groundMaterial(pack, b.tex) : mats[b.kind === 2 ? 1 : 0]);
       tris += (it.to - it.from) / 3;
     }
     mesh.frustumCulled = false;
@@ -346,7 +428,7 @@ async function main() {
   renderer.render(scene, camera);
   await renderer.backend.device?.queue.onSubmittedWorkDone();
   info.textContent = `${pack.meta.profile} · ${items.length} draws · ${Math.round(tris / 1000)}k triangles · places near ${counts[0]} mid ${counts[1]} far ${counts[2]} detail ${counts[3]}`;
-  window.__VIEW = { ready: true, draws: items.length, tris, counts };
+  window.__VIEW = { ready: true, draws: items.length, tris, counts, byKind, byLevel };
 }
 
 main().catch((e) => {

@@ -304,10 +304,11 @@ fn apply_control(v: &Value, s: &mut Settings, game: &mut Game, session: &mut Ses
     s.show.solids = flag("solids", s.show.solids);
     s.show.instances = flag("instances", s.show.instances);
     // `near`, `mid` and `detail` set the reaches outright and stop the governor; `budget` hands them back to it.
-    if v.get("near").is_some() || v.get("mid").is_some() || v.get("detail").is_some() {
+    if v.get("near").is_some() || v.get("mid").is_some() || v.get("detail").is_some() || v.get("far").is_some() {
         s.show.reach.near = num("near", s.show.reach.near);
         s.show.reach.mid = num("mid", s.show.reach.mid);
         s.show.reach.detail = num("detail", s.show.reach.detail);
+        s.show.reach.far = num("far", s.show.reach.far);
         s.govern = false;
     }
     if let Some(x) = v["budget"].as_u64() {
@@ -542,13 +543,13 @@ fn main() {
         let control = if live { control_watcher() } else { mpsc::channel().1 };
         let mut set = Settings {
             profile: false,
-            show: Show { reach: Reach { detail: 110.0, near: 260.0, mid: 1400.0 }, walls: true, solids: true, instances: true },
+            show: Show { reach: Reach { detail: 110.0, near: 260.0, mid: 1400.0, far: 7000.0 }, walls: true, solids: true, instances: true },
             pace: boot["pace"].as_i64().unwrap_or(1) as i32,
             interface: true,
             view: None,
             budget: 200_000,
             govern: true,
-            full: Reach { detail: 110.0, near: 260.0, mid: 1400.0 },
+            full: Reach { detail: 110.0, near: 260.0, mid: 1400.0, far: 7000.0 },
         };
         let mut scale = 1.0f32;
         let mut hold = 0u32;
@@ -719,7 +720,7 @@ fn main() {
                 }
                 hold = hold.saturating_sub(1);
                 scale = scale.clamp(0.3, 1.0);
-                set.show.reach = Reach { detail: set.full.detail * scale.max(0.6), near: set.full.near * scale, mid: set.full.mid * scale };
+                set.show.reach = Reach { detail: set.full.detail * scale.max(0.6), near: set.full.near * scale, mid: set.full.mid * scale, far: set.full.far * (0.5 + 0.5 * scale) };
             }
             let worked = t_frame.elapsed().saturating_sub(waited);
             g::vita2d_swap_buffers();

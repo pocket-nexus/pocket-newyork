@@ -89,6 +89,16 @@ impl Grid {
         }
     }
 
+    /// The height at a point, metres (0 outside the grid).
+    pub fn at(&self, x: f32, z: f32) -> f32 {
+        let h = &self.head;
+        let (i, j) = (((x - h.x0) / h.step).floor(), ((z - h.z0) / h.step).floor());
+        if i < 0.0 || j < 0.0 || i >= h.w as f32 || j >= h.h as f32 {
+            return 0.0;
+        }
+        self.data[j as usize * h.w as usize + i as usize] as f32 * h.unit
+    }
+
     pub fn bytes(&self) -> Vec<u8> {
         let mut out = ny_pack::bytes_of(&self.head).to_vec();
         out.extend_from_slice(ny_pack::slice_bytes(&self.data));

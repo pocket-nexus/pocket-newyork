@@ -27,6 +27,8 @@ pub struct Reach {
     pub detail: f32,
     pub near: f32,
     pub mid: f32,
+    /// Nothing farther is drawn: the haze has it.
+    pub far: f32,
 }
 
 /// A draw: a batch, and the range of its indices (or, for an instanced batch, of its instances) to draw. `cell`:
@@ -138,7 +140,11 @@ pub fn select(t: &Tables, planes: &Planes, eye: [f32; 3], reach: &Reach, ready: 
             if !visible(planes, rmin, rmax) {
                 continue;
             }
-            if dist(eye, rmin, rmax) >= reach.mid {
+            let dr = dist(eye, rmin, rmax);
+            if dr >= reach.far {
+                continue;
+            }
+            if dr >= reach.mid {
                 if r.far.count > 0 {
                     counts.places[2] += 1;
                     all(t, r.far.first, r.far.count, RESIDENT, out);
@@ -159,6 +165,9 @@ pub fn select(t: &Tables, planes: &Planes, eye: [f32; 3], reach: &Reach, ready: 
                         continue;
                     }
                     let d = dist(eye, bmin, bmax);
+                    if d >= reach.far {
+                        continue;
+                    }
                     if d >= reach.mid {
                         far_blocks[(j * rb + i) as usize] = true;
                         any_far = true;

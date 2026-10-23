@@ -250,6 +250,16 @@ fn main() {
     }
     let mut heights = heights::Grid::new([tops.min[0] - 300.0, tops.min[2] - 300.0], [tops.max[0] + 300.0, tops.max[2] + 300.0], 2.0, 0.125);
     eprintln!("heights: {} × {} cells of {} m", heights.head.w, heights.head.h, heights.head.step);
+    // Every box's footprint first: a wall is drawn only as far as no neighbour covers it (`facade_instance`).
+    for (oid, _, m, _) in &placed {
+        if classes[*oid] == Class::Facade {
+            let c = |x: f32, z: f32| {
+                let p = geom::point(m, [x, -0.5, z]);
+                [p[0], p[2]]
+            };
+            heights.footprint([c(-0.5, -0.5), c(0.5, -0.5), c(0.5, 0.5), c(-0.5, 0.5)], geom::point(m, [0.0, 0.5, 0.0])[1]);
+        }
+    }
 
     // Probed colours are read an object at a time.
     let mut probe_of: Option<(usize, Option<ir::Probe>)> = None;
@@ -276,13 +286,7 @@ fn main() {
         // Across the rivers the city is seen from afar: no near level.
         let distant = o.path.starts_with("Boroughs/BoroughBuildings") || o.path.starts_with("Boroughs/BoroughIsland");
         // What stands up casts shadows: a facade box by its footprint, anything else near by its triangles.
-        if class == Class::Facade {
-            let c = |x: f32, z: f32| {
-                let p = geom::point(m, [x, -0.5, z]);
-                [p[0], p[2]]
-            };
-            heights.footprint([c(-0.5, -0.5), c(0.5, -0.5), c(0.5, 0.5), c(-0.5, 0.5)], geom::point(m, [0.0, 0.5, 0.0])[1]);
-        } else if class == Class::Solid && !distant && radius >= profile.detail_radius && b.max[1] > 1.5 && b.radius() < 3000.0 {
+        if class == Class::Solid && !distant && radius >= profile.detail_radius && b.max[1] > 1.5 && b.radius() < 3000.0 {
             for (_, tris) in &src.lods[0] {
                 for f in tris.chunks(3) {
                     let p = |k: usize| geom::point(m, src.pos[f[k] as usize]);
@@ -297,7 +301,7 @@ fn main() {
             continue;
         }
         if class == Class::Facade {
-            facade_instance(&ir, o, *i, m, b, &facades, &textures, probe, &mut bins, &profile, &mut attrs_cache, &mut spend);
+            facade_instance(&ir, o, *i, m, b, &facades, &textures, probe, &mut bins, &profile, &mut attrs_cache, &mut spend, &heights);
         }
         // A facade box's far level is its height's to decide (see `facade_instance`).
         let tall = class == Class::Facade && b.size()[1] >= 20.0;
@@ -418,7 +422,7 @@ fn main() {
     let mut spent: Vec<_> = spend.into_iter().collect();
     spent.sort_by(|a, b| b.1.cmp(&a.1));
     for want in [0usize, 1, 2, 3] {
-        for ((_, label), n) in spent.iter().filter(|e| e.0 .0 == want).take(if want == 0 { 12 } else { 8 }) {
+        for ((_, label), n) in spent.iter().filter(|e| e.0 .0 == want).take(if want == 1 { 24 } else { 6 }) {
             eprintln!("  {} {:>9} {label}", ["near", "mid", "far", "detail"][want], n);
         }
     }
@@ -478,7 +482,7 @@ fn main() {
 /// One facade box: its walls under the pages at the near and the mid level, and at the far level a box painted
 /// with the pages' mean colours (the roof comes from the probe, as for any solid).
 #[allow(clippy::too_many_arguments)]
-fn facade_instance(ir: &Ir, o: &Object, i: usize, m: &M4, b: &Aabb, facades: &facade::Facades, textures: &tex::Textures, probe: Option<&ir::Probe>, bins: &mut Bins, profile: &Profile, cache: &mut HashMap<(usize, String), Vec<f32>>, spend: &mut HashMap<(usize, String), usize>) {
+fn facade_instance(ir: &Ir, o: &Object, i: usize, m: &M4, b: &Aabb, facades: &facade::Facades, textures: &tex::Textures, probe: Option<&ir::Probe>, bins: &mut Bins, profile: &Profile, cache: &mut HashMap<(usize, String), Vec<f32>>, spend: &mut HashMap<(usize, String), usize>, heights: &heights::Grid) {
     let _ = probe;
     let Some(style) = ir.material_key(o.material(0)).and_then(|k| facades.styles.get(&k)) else { return };
     let inst = o.instances.as_ref().unwrap();
@@ -490,6 +494,7 @@ fn facade_instance(ir: &Ir, o: &Object, i: usize, m: &M4, b: &Aabb, facades: &fa
     let (bx, faces) = (attr("box"), attr("faces"));
     let mut quads = Vec::new();
     facade::box_walls(style, m, bx, faces, &mut quads);
+    quads.retain_mut(|q| uncover(q, heights, false));
     let center = b.center();
     // Near: every quad.
     *spend.entry((0, "facade walls".into())).or_default() += quads.len() * 2;
@@ -500,6 +505,7 @@ fn facade_instance(ir: &Ir, o: &Object, i: usize, m: &M4, b: &Aabb, facades: &fa
     // Mid: one quad a wall, under the page of its upper storeys.
     let mut simple = Vec::new();
     facade::box_walls_simple(style, m, bx, faces, &mut simple);
+    simple.retain_mut(|q| uncover(q, heights, true));
     if b.radius() >= profile.mid_radius {
         *spend.entry((1, "facade walls".into())).or_default() += simple.len() * 2;
         let (mid, sub) = bins.place(MID, center);
@@ -691,4 +697,50 @@ fn tree_instance(ir: &Ir, o: &Object, i: usize, m: &M4, b: &Aabb, src: &Source, 
     let rows = [[m[0], m[4], m[8], m[12]], [m[1], m[5], m[9], m[13]], [m[2], m[6], m[10], m[14]]];
     let place = bins.place(NEAR, b.center());
     bins.instance(NEAR, place, pack::kind::LEAF_INST, shape, pack::Instance { rows, tint: [tint[0], tint[1], tint[2], 255] }, b);
+}
+
+/// What of a wall's quad no neighbour covers: false when the boxes beside it stand at least as high as its top all
+/// along it (1.5 m out from its face, by the grid of heights); with `trim`, a quad a lower neighbour covers in part
+/// starts at the neighbour's roof.
+fn uncover(q: &mut facade::Quad, heights: &heights::Grid, trim: bool) -> bool {
+    let n = q.v[0].n.map(|c| c as f32 / 127.0);
+    if n[1].abs() > 0.5 {
+        return true;
+    }
+    let (bottom, top) = q.v.iter().fold((f32::MAX, f32::MIN), |(lo, hi), v| (lo.min(v.p[1]), hi.max(v.p[1])));
+    // The quad's two ends, along the ground.
+    let low: Vec<[f32; 3]> = q.v.iter().filter(|v| (v.p[1] - bottom).abs() < 0.01).map(|v| v.p).collect();
+    if low.len() != 2 {
+        return true;
+    }
+    let (a, b) = (low[0], low[1]);
+    let len = ((b[0] - a[0]).powi(2) + (b[2] - a[2]).powi(2)).sqrt();
+    let steps = ((len / 2.0).ceil() as usize).max(1);
+    let mut cover = f32::MAX;
+    for k in 0..=steps {
+        // (inset from the ends, where the box's own corner and the street meet)
+        let t = 0.1 + 0.8 * k as f32 / steps as f32;
+        let (x, z) = (a[0] + (b[0] - a[0]) * t + n[0] * 1.5, a[2] + (b[2] - a[2]) * t + n[2] * 1.5);
+        cover = cover.min(heights.at(x, z));
+    }
+    if cover >= top - 0.3 {
+        return false;
+    }
+    if trim && cover > bottom + 0.5 {
+        let f = (cover - bottom) / (top - bottom);
+        let (lo, hi): (Vec<usize>, Vec<usize>) = (0..4).partition(|&k| (q.v[k].p[1] - bottom).abs() < 0.01);
+        for &k in &lo {
+            // The corner above this one, to slide the texture coordinates with it.
+            let above = hi.iter().copied().min_by(|&x, &y| {
+                let d = |j: usize| (q.v[j].p[0] - q.v[k].p[0]).powi(2) + (q.v[j].p[2] - q.v[k].p[2]).powi(2);
+                d(x).partial_cmp(&d(y)).unwrap()
+            });
+            if let Some(h) = above {
+                let (vb, vt) = (q.v[k], q.v[h]);
+                q.v[k].p[1] = cover;
+                q.v[k].uv = [vb.uv[0] + (vt.uv[0] - vb.uv[0]) * f, vb.uv[1] + (vt.uv[1] - vb.uv[1]) * f];
+            }
+        }
+    }
+    true
 }
