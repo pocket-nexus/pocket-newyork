@@ -3,11 +3,11 @@ uniform sampler2D uShadow;
 // [0] rgb: the haze. [1] rgb: the sun
 uniform float4 uLook[2];
 
-half4 main(float2 vUv : TEXCOORD0, float2 vMap : TEXCOORD1, float vHeight : TEXCOORD2, half4 vLight : COLOR0, half4 vColor : COLOR1, half4 vBark : COLOR2) : COLOR
+half4 main(float2 vUv : TEXCOORD0, float2 vMap : TEXCOORD1, float vHeight : TEXCOORD2, float vLeaf : TEXCOORD3, half4 vLight : COLOR0, half4 vColor : COLOR1) : COLOR
 {
     half4 t = (half4)tex2D(uLeaves, vUv);
     // Bark reads white and opaque: its colour is its own.
-    half4 leaf = lerp(half4(1.0, 1.0, 1.0, 1.0), t, vBark.a);
+    half4 leaf = lerp(half4(1.0, 1.0, 1.0, 1.0), t, (half)vLeaf);
     if (leaf.a < 0.5)
         discard;
     half lit = (half)saturate((vHeight - tex2D(uShadow, vMap).r * SHADOW_UNIT) * SHADOW_K + 1.0);
