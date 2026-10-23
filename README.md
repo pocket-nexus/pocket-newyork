@@ -2,7 +2,7 @@
 
 Manhattan on a PS Vita: on foot, in a yellow taxi, on a bicycle or in a sightseeing helicopter, from the Battery to 125th Street, at four hours of the day, with the traffic on its streets. The city is [Slop New York](https://github.com/mrdoob/slop-newyork) by mrdoob, a three.js simulation of New York built from NYC Open Data and OpenStreetMap; this repository compiles what it draws for a handheld and draws it there.
 
-**Status: paused.** It runs on a PS Vita in Pocket Devkit, at 60 frames a second over the title's aerial camera, but its picture is not yet as good as the reference's; [Where it stands](#where-it-stands) lists what is left. No package has been released. Compiled city data keeps the terms of its sources ([Attribution](#attribution)).
+**Status: in progress.** It runs on a PS Vita in Pocket Devkit at 30 frames a second, at street level and over the title's aerial camera; [Where it stands](#where-it-stands) lists what is left. No package has been released. Compiled city data keeps the terms of its sources ([Attribution](#attribution)).
 
 The city is modelled once, as the reference's three.js scene that runs in a browser, and a compiler lowers it to what a console draws:
 
@@ -62,29 +62,32 @@ The reference imports three.js from its dev branch on a CDN; `THREE_COMMIT` in `
 - **The levels of detail** follow `ny_view::select`: regions past the far reach (7 km, where the hour's haze has the city) are not drawn, regions past the mid reach draw their far level, blocks past the near reach their mid level, cells within it their near level and, within the detail reach, their small things. A governor draws the reaches in when a frame draws more than its triangle budget or waits on the GPU.
 - **Shadows** come from `HMAP`. A thread reads a 2 km window of it around the eye from the pack and sweeps it for the hour's sun (`ny_sim::shadow::sweep`, from Pocket Tokyo): each cell gets the height below which a point over it is in shadow. Every program compares its own height with the window's, read a little way out along its normal so that a wall does not read its own building's top.
 - **The programs** light in linear light with the hour's read-back light and end with its tone curve, then lay the haze over: the reference's aerial fog, its colour by the draw's direction and its density by the draw's height. Surfaces reflect the sky by their roughness and metalness (Schlick's Fresnel as roughness damps it), and the city's dim light where a reflection meets buildings across the street. Walls read their facade page and, by night, the page of what their rooms emit. Ground reads its picture over world x and z. Geometry coloured by vertex takes its probed colour, and its emission by night. Instanced shapes take their instance's matrix and tint from a second stream; trees cut their cards where the leaves' picture is under half. The sky is a dome under the hour's panorama.
-- **What moves** is drawn from the game each frame: the traffic's cars by kind, painted by their tint, those in view and within the middle distance; the sidewalks' people (the nearest 48 within 100 m, the near figure within 25 m) at their heights and in their coats; the highway's cars; and the player's vehicle.
+- **Shadows near the eye.** Besides the height grid's sweep, a 1 024² depth map of a 320 m square the sun looks down on is drawn before each frame from the near cells and what moves (trees, lamp posts, awnings, cars and people cast shadows, buildings' have edges); every program takes the darker of the two.
+- **What the street hides is not drawn.** A horizon around the eye, from the height grid's 8 m cells at their lowest within 256 m, leaves out the mid and far blocks (and near cells) nothing of which rises over it: from street level most of the city behind the avenue's walls.
+- **Night.** The lamps' pools are the reference's cobra-head spotlights (88 cd, 0.96 rad, 25 m); everything lit takes them, and the light they leave around (the pools over ~80 m); wet ground mirrors them by Fresnel, wetness and smoothness. The reference's bloom runs at every hour, and the sun has its disc.
+- **What moves** is drawn from the game each frame: the traffic's cars (the reference's full cars within 40 m, its stand-ins past that) under pictures of themselves seen along each axis, those in view to 450 m; the sidewalks' people (the nearest 24 within 70 m, the near figure within 15 m) at their heights and in their coats; the highway's cars; and the player's vehicle. The traffic, the people and the highway step on a thread of their own alongside the frame.
 - **The interface** is the PocketJS guest of `ui/`, drawn over the city.
 - **The Pocket3D title card** plays first.
 
 ## Measured on the console
 
-PS Vita, Pocket Devkit over USB, 4× multisampling, `bun tools/vita.ts bench` and the device's own timings (`profile`), 2026-10-23:
+PS Vita, Pocket Devkit over USB, 30 frames a second, 2× multisampling, `bun tools/vita.ts bench` and the device's own timings (`profile`), 2026-10-23:
 
 | | |
 | --- | --- |
-| Title's aerial camera, 30 s | 1 800 frames, 9 late; the governor holds a mean of 125 000 triangles |
-| First launch | 75 s, 64 s of it copying the 361 MB pack to the memory card |
-| GPU time at the start (5th Ave & E 37th St), reaches pinned at 78 / 420 m | 24.6 ms: the sky reflection 2.2 ms, the tone curve 1.8 ms; 2× multisampling saves 2.2 ms |
+| Street level (5th Ave & E 37th St), 30 s | 900 frames, 8 late; a mean of 175 000 triangles |
+| Title's aerial camera, 30 s | 900 frames, 5 late; a mean of 176 000 triangles |
+| GPU at the street, by part (reaches at the governor's floor) | trees 5.5 ms, what moves 5.1, bloom 1.8, the sun's map 1.5 |
+| CPU | the world's step off the frame (0.1 ms waited for it); the horizon 4.8 ms |
+| First launch | about 75 s, most of it copying the 377 MB pack to the memory card |
 
 ## Where it stands
 
 Beside the reference from the same eye (`bun tools/newyork.ts look --eye x,y,z --at x,y,z`), what is left:
 
-- **The player's taxi** smears its tail lamps' red over its back: the reference's car material paints lamps, grille and trim from object-space position, and a colour per vertex cannot hold them. Its colour graph wants baking into a picture over the body's texture coordinates (a `vertexNode` placing each vertex at its UV, as the probe places points), and a model program that reads it.
-- **Night streets are dark.** The reference lights them with pooled spot and point lights (88 cd cobra heads, 25 m); the lamps' pools on the ground here come out far weaker under the linear light and need calibrating against it, and the lamps' light on trees and cars is missing.
-- **Leaves** are brighter than the reference's: its crowns shadow themselves through its shadow map, and these do not.
 - **Roofs** past the near level are flat and bluish: the reference draws rooftop plant (water towers, bulkheads, chillers) within 560 m, and here only the near level carries it.
-- **Not drawn yet:** the steam, the highway's lamp flares by night.
+- **Leaves** past the sun's map have no shadow, and near crowns cost the most of a street frame (their cards are cut, so the GPU shades every layer).
+- **Not drawn yet:** the steam, the headlights' beams, the highway's lamp flares, the soft shadow under a car.
 - **Not done:** the Pocket3D Demo row, LiveArea pictures, a package.
 
 ## The interface
