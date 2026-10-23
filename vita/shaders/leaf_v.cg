@@ -28,8 +28,16 @@ void main(
     oUv = aUv * UV_RANGE;
     oMap = shadow_map(world, n, uFrame);
     oHeight = world.y;
-    // Cards light from the side that faces the sun, as thin things do; deep in the crown, less.
-    oLight = float4(hemi(n, uFrame) * aAo, (abs(dot(n, uFrame[0].xyz)) * 0.55 + 0.1) * aAo * aAo);
+    // As the reference lights a card (TreeNodeMaterial): by the side the eye sees, the sun on it and a quarter of
+    // that through it from behind; the sky's light darkened deep in the crown (its aoNode, crown × 0.75 + 0.25), and
+    // its colour too (crown × 0.45 + 0.55, which the vertex's ao is).
+    float3 to = uFrame[4].xyz - world;
+    float3 seen = dot(n, to) < 0.0 ? -n : n;
+    float s = dot(seen, uFrame[0].xyz);
+    float crown = saturate((aAo - 0.55) * (1.0 / 0.45));
+    // The reference's crowns shadow themselves; here the sun reaches the outer leaves, and little of it the inner.
+    float reach = crown * crown * 0.8 + 0.2;
+    oLight = float4(hemi(seen, uFrame) * (aAo * (crown * 0.75 + 0.25)), (max(s, 0.0) + max(-s, 0.0) * 0.25) * aAo * reach);
     // A card takes the tree's tint over the picture; bark keeps its colour (alpha: which it is).
     oColor = float4(saturate(lerp(aBark.rgb, aTint.rgb * 2.0, aBark.a)), haze_of(world, oPosition.w, uFrame));
     oLeaf = aBark.a;

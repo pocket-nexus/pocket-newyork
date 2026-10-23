@@ -2,7 +2,7 @@
 
 Manhattan on a PS Vita: on foot, in a yellow taxi, on a bicycle or in a sightseeing helicopter, from the Battery to 125th Street, at four hours of the day, with the traffic on its streets. The city is [Slop New York](https://github.com/mrdoob/slop-newyork) by mrdoob, a three.js simulation of New York built from NYC Open Data and OpenStreetMap; this repository compiles what it draws for a handheld and draws it there.
 
-The packages for each device are on [Pocket Studio](https://studio.pocket.nexus) for its members. Compiled city data keeps the terms of its sources ([Attribution](#attribution)).
+**Status: paused.** It runs on a PS Vita in Pocket Devkit, at 60 frames a second over the title's aerial camera, but its picture is not yet as good as the reference's; [Where it stands](#where-it-stands) lists what is left. No package has been released. Compiled city data keeps the terms of its sources ([Attribution](#attribution)).
 
 The city is modelled once, as the reference's three.js scene that runs in a browser, and a compiler lowers it to what a console draws:
 
@@ -41,25 +41,51 @@ The reference imports three.js from its dev branch on a CDN; `THREE_COMMIT` in `
 - **Ground pictures**: the sidewalk's flags, the asphalt and its manholes, park paving and lawn, each from straight above over a square its pattern repeats in, folded at its edges so that it repeats without a seam.
 - **The leaves**: the trees' leaf atlas through the tree material's colour graph.
 - **What moves** (`models.js`): the reference's own stand-in cars (drawn there past 30 m), the bus, and the player's taxi, bicycle and helicopter, each vertex probed with white and with black paint so the compiler knows what of it is paint.
+- **Signs and billboards** (`bake.js`): every material that shows a picture over its texture coordinates (Times Square's billboards, shop signs, street-name blades) drawn flat through its own colour graph.
+- **The light** (`light.js`): per hour, a white diffuse sphere drawn under the reference's lights and environment, its linear radiance read back and fitted as a hemisphere and the sun; the reference's sky as a panorama, graded and tone-mapped as its post-processing does; the haze's colour over the horizon by angle to the sun; the sky a surface reflects; and the grade and ACES of a grey fitted as one rational curve (within 0.013 of the display's value).
 - **The world** (`world.js`, `sim.js`, `map.js`): the hours read back from the reference's lighting, its places, cameras and street names, its colliders and road network, and its map of the island.
 
 ## The compiler
 
+- **Facade boxes at the far level** are prisms, as Pocket Tokyo draws its simple levels: every box's footprint goes into one grid of 4 m cells, cells within 10 m of height form a terrace, and a terrace's outline, straightened, becomes its walls (only where it looks out over lower ground) and a flat top. 138 000 triangles for all of Manhattan, low-rise included, where a painted box per tall building took 346 000.
 - **Facade boxes** become their walls, laid out as the reference's `facadeCell` lays them: a row for a partial storey at the bottom, the ground storey under its shop, entrance or rear page, the whole storeys above under the upper page, a solid band for a storey cut short at the top, and on masonry, columns for the corner piers. A wall quad is tested against the grid of heights 1.5 m out from its face: one its neighbours cover all along is left out, and at the mid and far levels one a lower neighbour covers in part starts at the neighbour's roof. That leaves out 40 % of the wall triangles.
 - **Repeated things** (lamp posts, signals, cornices, water towers, awnings, the bridges' members, the trees) are one shape each and an instance table: a matrix and a tint. Instance colours (awnings) are the tint itself; any other per-instance difference rides as the instance's mean probed colour against the first's.
 - **The levels of detail.** A cell is 128 m and holds the near level; its small repeated things (radius under 2.5 m) are its detail level. A block is 4 × 4 cells and holds the mid level; a region is 4 × 4 blocks and holds the far level. Island-wide meshes (the streets, the parks, the water) are cut by triangle. Each level simplifies what it holds (meshoptimizer, welded first), and what is merged clutter goes by a grid past the near level.
 - **Order is the culling structure.** A mid batch has its triangles (an instanced one, its instances) ordered by the cell of its block, a far batch by the block of its region, with a record of where each starts (`SPAN`): a frame draws, of a block the eye is near, the runs of the cells it does not draw near.
 - **Cells' records.** A cell's near and detail levels are one record of `NEAR`, read from the memory card when the eye comes near: 204 MB in all, 0.47 MB at most. The pack's own streams (the shapes, the mid and far levels) stay in memory.
 - **Heights.** Everything near that stands up is drawn into a grid of 2 m cells (`HMAP`): a facade box by its footprint, anything else by its triangles.
+- **Island-wide surfaces** (the water, the streets) are cut into pieces of at most 128, 256 and 512 m at the near, mid and far levels, so that what a program works out at the vertices does not stretch across a river; the reference's water past the grid is left out.
+- **What a surface reflects** rides with it: roughness and metalness in a solid vertex's spare bytes, and per picture for walls, ground and signs.
 
 ## The frame on the Vita
 
 - **The levels of detail** follow `ny_view::select`: regions past the far reach (7 km, where the hour's haze has the city) are not drawn, regions past the mid reach draw their far level, blocks past the near reach their mid level, cells within it their near level and, within the detail reach, their small things. A governor draws the reaches in when a frame draws more than its triangle budget or waits on the GPU.
 - **Shadows** come from `HMAP`. A thread reads a 2 km window of it around the eye from the pack and sweeps it for the hour's sun (`ny_sim::shadow::sweep`, from Pocket Tokyo): each cell gets the height below which a point over it is in shadow. Every program compares its own height with the window's, read a little way out along its normal so that a wall does not read its own building's top.
-- **The programs.** Walls read their facade page and, by night, the page of what their rooms emit. Ground reads its picture over world x and z. Geometry coloured by vertex takes its probed colour, and its emission by night. Instanced shapes take their instance's matrix and tint from a second stream; trees cut their cards where the leaves' picture is under half. The sky is a dome in the hour's colours.
-- **What moves** is drawn from the game each frame: the traffic's cars by kind, painted by their tint, and the player's vehicle.
+- **The programs** light in linear light with the hour's read-back light and end with its tone curve, then lay the haze over: the reference's aerial fog, its colour by the draw's direction and its density by the draw's height. Surfaces reflect the sky by their roughness and metalness (Schlick's Fresnel as roughness damps it), and the city's dim light where a reflection meets buildings across the street. Walls read their facade page and, by night, the page of what their rooms emit. Ground reads its picture over world x and z. Geometry coloured by vertex takes its probed colour, and its emission by night. Instanced shapes take their instance's matrix and tint from a second stream; trees cut their cards where the leaves' picture is under half. The sky is a dome under the hour's panorama.
+- **What moves** is drawn from the game each frame: the traffic's cars by kind, painted by their tint, those in view and within the middle distance, and the player's vehicle.
 - **The interface** is the PocketJS guest of `ui/`, drawn over the city.
 - **The Pocket3D title card** plays first.
+
+## Measured on the console
+
+PS Vita, Pocket Devkit over USB, 4× multisampling, `bun tools/vita.ts bench` and the device's own timings (`profile`), 2026-10-23:
+
+| | |
+| --- | --- |
+| Title's aerial camera, 30 s | 1 800 frames, 9 late; the governor holds a mean of 125 000 triangles |
+| First launch | 75 s, 64 s of it copying the 361 MB pack to the memory card |
+| GPU time at the start (5th Ave & E 37th St), reaches pinned at 78 / 420 m | 24.6 ms: the sky reflection 2.2 ms, the tone curve 1.8 ms; 2× multisampling saves 2.2 ms |
+
+## Where it stands
+
+Beside the reference from the same eye (`bun tools/newyork.ts look --eye x,y,z --at x,y,z`), what is left:
+
+- **The player's taxi** smears its tail lamps' red over its back: the reference's car material paints lamps, grille and trim from object-space position, and a colour per vertex cannot hold them. Its colour graph wants baking into a picture over the body's texture coordinates (a `vertexNode` placing each vertex at its UV, as the probe places points), and a model program that reads it.
+- **Night streets are dark.** The reference lights them with pooled spot and point lights (88 cd cobra heads, 25 m); the lamps' pools on the ground here come out far weaker under the linear light and need calibrating against it, and the lamps' light on trees and cars is missing.
+- **Leaves** are brighter than the reference's: its crowns shadow themselves through its shadow map, and these do not.
+- **Roofs** past the near level are flat and bluish: the reference draws rooftop plant (water towers, bulkheads, chillers) within 560 m, and here only the near level carries it.
+- **Not drawn yet:** pedestrians, the highway's traffic, the steam.
+- **Not done:** the Pocket3D Demo row, LiveArea pictures, a package.
 
 ## The interface
 
