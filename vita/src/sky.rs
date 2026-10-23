@@ -14,6 +14,7 @@ pub struct Sky {
     _block: Block,
     prog: Program,
     mvp: Param,
+    sun: Param,
     unit: u32,
     textures: Vec<g::SceGxmTexture>,
     dome: (*const u8, *const u16, u32),
@@ -76,18 +77,21 @@ impl Sky {
             }
         }
         let prog = gpu.program("sky", "", SKY_V, SKY_F, &[Stream { stride: 20, instanced: false, attrs: &[("aPosition", 0, F32, 3), ("aUv", 12, F32, 2)] }], msaa, [Blend::Opaque, Blend::Alpha])?;
-        Ok(Sky { _block: block, mvp: prog.vs.param("uMvp"), unit: prog.fs.sampler_index("uSky").unwrap_or(0), textures, prog, dome: (dv.cast(), di, (RINGS * AROUND * 6) as u32) })
+        Ok(Sky { _block: block, mvp: prog.vs.param("uMvp"), sun: prog.vs.param("uSun"), unit: prog.fs.sampler_index("uSky").unwrap_or(0), textures, prog, dome: (dv.cast(), di, (RINGS * AROUND * 6) as u32) })
     }
 
-    /// `mvp`: the view and projection with the eye at the origin; `hour`: which of the pack's hours.
+    /// `mvp`: the view and projection with the eye at the origin; `hour`: which of the pack's hours; `sun`: towards
+    /// the sun (or the moon), and its colour as the display shows it.
     ///
     /// # Safety
     /// Inside a scene on `ctx`.
-    pub unsafe fn draw(&self, ctx: *mut g::SceGxmContext, mvp: &[f32; 16], hour: usize) {
+    pub unsafe fn draw(&self, ctx: *mut g::SceGxmContext, mvp: &[f32; 16], hour: usize, sun: &[f32; 8]) {
         self.prog.bind(ctx, false);
         gpu::state_overlay(ctx, true);
         g::sceGxmSetFragmentTexture(ctx, self.unit, &self.textures[hour.min(self.textures.len() - 1)]);
-        Uniforms::vertex(ctx).set(self.mvp, mvp);
+        let v = Uniforms::vertex(ctx);
+        v.set(self.mvp, mvp);
+        v.set(self.sun, sun);
         gpu::draw(ctx, self.dome.0, self.dome.1, self.dome.2);
     }
 }

@@ -1,15 +1,24 @@
 // The sky: a dome around the eye under the hour's panorama of the reference's sky (by longitude and latitude, as
-// the export drew it, graded as the display shows it).
+// the export drew it, graded as the display shows it), and where the sun's disc is.
 
 void main(
     float3 aPosition,
     float2 aUv,
     uniform float4x4 uMvp,
+    // xyz: towards the sun (or the moon); and its colour as the display shows it, over its disc and glow
+    uniform float4 uSun[2],
     out float4 oPosition : POSITION,
-    out float2 oUv : TEXCOORD0)
+    out float2 oUv : TEXCOORD0,
+    out float3 oDir : TEXCOORD1,
+    // the direction crossed with the sun's (linear in the direction, so exact across a triangle); w: on its side
+    out float4 oOff : TEXCOORD2,
+    out half4 oSun : COLOR0)
 {
     float4 p = mul(uMvp, float4(aPosition, 1.0));
     // At the far plane, whatever the dome's radius.
     oPosition = float4(p.xy, p.w, p.w);
     oUv = aUv;
+    oDir = aPosition;
+    oOff = float4(cross(aPosition, uSun[0].xyz), dot(aPosition, uSun[0].xyz));
+    oSun = (half4)float4(uSun[1].rgb * 0.5, 1.0);
 }

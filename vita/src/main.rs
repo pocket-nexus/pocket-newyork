@@ -824,6 +824,14 @@ fn main() {
                 }
             }
             let hour_shown = game.hour.index();
+            // The sun's disc in its own colour, brighter than the sky round it (the moon's, dimmer).
+            let sun_disc = {
+                let c = preset.light_sun;
+                let top = c[0].max(c[1]).max(c[2]).max(1e-4);
+                let k = if preset.night > 0.5 { 0.55 } else { 1.6 };
+                let d = preset.sun_dir;
+                [d[0], d[1], d[2], 0.0, c[0] / top * k, c[1] / top * k, c[2] / top * k, 0.0]
+            };
             // The world's step for this frame on its own thread while the frame draws; the game is the thread's until
             // the join below (what moves is drawn as it stood after the frame before's step).
             if let Some(w) = world_step {
@@ -860,7 +868,7 @@ fn main() {
             g::vita2d_start_drawing_advanced(core::ptr::null_mut(), 0);
             // The sky covers the whole frame: nothing is cleared.
             g::sceGxmSetViewport(ctx, 480.0, 480.0, 272.0, -272.0, 0.0, 1.0);
-            sky.draw(ctx, &sky_mvp, hour_shown);
+            sky.draw(ctx, &sky_mvp, hour_shown, &sun_disc);
             let th = Instant::now();
             // What the street hides (from above the city, nothing).
             horizon.build(eye, if set.occlude { shadows.coarse() } else { None }.as_deref());

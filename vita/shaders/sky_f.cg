@@ -1,6 +1,13 @@
 uniform sampler2D uSky;
 
-half4 main(float2 vUv : TEXCOORD0) : COLOR
+half4 main(float2 vUv : TEXCOORD0, float3 vDir : TEXCOORD1, float4 vOff : TEXCOORD2, half4 vSun : COLOR0) : COLOR
 {
-    return half4((half3)tex2D(uSky, vUv).rgb, 1.0);
+    half3 c = (half3)tex2D(uSky, vUv).rgb;
+    // How far from the sun, as the square of the angle's sine (exact near the sun, where a cosine is not), on its
+    // side of the sky only: a disc of some 0.6°, and a glow round it.
+    float s2 = dot(vOff.xyz, vOff.xyz) / dot(vDir, vDir);
+    float disc = saturate((1.2e-4 - s2) * 4.0e4);
+    float glow = exp(-s2 * 400.0) * 0.3;
+    c += vSun.rgb * (half)((disc + glow) * 2.0 * step(0.0, vOff.w));
+    return half4(c, 1.0);
 }
