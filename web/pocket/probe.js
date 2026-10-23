@@ -2,8 +2,9 @@
 //
 // Each object of scene.json is drawn again as points (its instances as exported, the union of every camera position),
 // one pixel a vertex: point `instance × vertices + vertex` of a float target. The probe material is the object's own
-// colour graph (colorNode, or color × map × vertex colours) and opacity, without light; a second pass draws its
-// emission graph under the night preset. The compiler gives a surface without a picture of its own these colours.
+// colour graph (colorNode, or color × map × vertex colours) and opacity, without light, under the midday preset; a
+// second pass draws its emission graph under the night preset (an unlit material's colour graph, which is its
+// light). The compiler gives a surface without a picture of its own these colours.
 //
 // Writes `probe/<object>.bin`: per point 4 bytes of albedo (sRGB, alpha = opacity), then per point 4 bytes of
 // emission (RGBM: rgb × m × 16, linear); `probe.json` says how many instances of each object were probed.
@@ -36,6 +37,13 @@ function probeMaterial(orig, which, uVerts, uFirst) {
     m.colorNode = orig.colorNode ?? null;
     m.opacity = orig.opacity ?? 1;
     m.opacityNode = orig.opacityNode ?? null;
+  } else if (orig.isMeshBasicNodeMaterial || orig.type === 'MeshBasicNodeMaterial') {
+    // An unlit material's light is its colour: by night, its colour graph under the night preset.
+    if (orig.color) m.color.copy(orig.color);
+    m.map = orig.map ?? null;
+    m.vertexColors = !!orig.vertexColors;
+    m.colorNode = orig.colorNode ?? null;
+    m.opacityNode = float(1);
   } else {
     const e = orig.emissive ? orig.emissive.clone().multiplyScalar(orig.emissiveIntensity ?? 1) : new THREE.Color(0, 0, 0);
     m.color.copy(e);
@@ -90,6 +98,10 @@ export async function probe(app, exported) {
   const index = [];
 
   const { entries, sets } = exported;
+  // A preset here sets the city's uniforms alone: the environment map the reference bakes with it is no part of a
+  // surface's colour, and baking it twice an object costs time.
+  const bake = lighting.bakeEnvironmentMap;
+  lighting.bakeEnvironmentMap = () => {};
   for (let i = 0; i < entries.length; i++) {
     const entry = entries[i];
     const o = exported.objects[i];
@@ -153,6 +165,7 @@ export async function probe(app, exported) {
     objects++;
     if (objects % 50 === 0) log(`probe: ${objects} objects, ${(points / 1e6).toFixed(1)} M points`);
   }
+  lighting.bakeEnvironmentMap = bake;
   lighting.applyPreset('golden', true);
   target.dispose();
   await put('probe.json', JSON.stringify(index));

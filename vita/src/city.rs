@@ -107,6 +107,8 @@ struct Pass {
     prog: Program,
     mvp: Param,
     tile: Param,
+    lamp_map: Param,
+    lamp: Option<u32>,
     vp: Param,
     bx: Param,
     frame: Param,
@@ -118,14 +120,17 @@ struct Pass {
 impl Pass {
     unsafe fn new(prog: Program, pictures: [&str; 2]) -> Pass {
         let units = pictures.map(|name| if name.is_empty() { 0 } else { prog.fs.sampler_index(name).unwrap_or(0) });
-        Pass { mvp: prog.vs.param("uMvp"), tile: prog.vs.param("uTile"), vp: prog.vs.param("uVp"), bx: prog.vs.param("uBox"), frame: prog.vs.param("uFrame"), look: prog.fs.param("uLook"), units, shadow: prog.fs.sampler_index("uShadow"), prog }
+        Pass { mvp: prog.vs.param("uMvp"), tile: prog.vs.param("uTile"), lamp_map: prog.vs.param("uLampMap"), lamp: prog.fs.sampler_index("uLamp"), vp: prog.vs.param("uVp"), bx: prog.vs.param("uBox"), frame: prog.vs.param("uFrame"), look: prog.fs.param("uLook"), units, shadow: prog.fs.sampler_index("uShadow"), prog }
     }
 
-    /// Binds the program and the shadow window.
-    unsafe fn bind(&self, ctx: *mut g::SceGxmContext, shadow: &g::SceGxmTexture) {
+    /// Binds the program, the shadow window and the lamps' light.
+    unsafe fn bind(&self, ctx: *mut g::SceGxmContext, shadow: &g::SceGxmTexture, lamp: &g::SceGxmTexture) {
         self.prog.bind(ctx, false);
         if let Some(unit) = self.shadow {
             g::sceGxmSetFragmentTexture(ctx, unit, shadow);
+        }
+        if let Some(unit) = self.lamp {
+            g::sceGxmSetFragmentTexture(ctx, unit, lamp);
         }
     }
 }
@@ -177,7 +182,13 @@ pub struct CityGpu {
     inst: Pass,
     inst_open: Pass,
     ground: Pass,
+    ground_night: Pass,
     leaf: Pass,
+    /// The lamps' light on the ground by night, and from world x and z to its texture coordinates.
+    lamp: g::SceGxmTexture,
+    lamp_map: [f32; 4],
+    /// The light a channel's full value stands for.
+    pub lamp_unit: f32,
     items: Vec<Item>,
     wanted: Vec<(u32, f32)>,
     pub models: Vec<Model>,
@@ -237,6 +248,7 @@ impl CityGpu {
         let leaf_streams = [Stream { stride: 20, instanced: false, attrs: &LEAF_ATTRS }, Stream { stride: 52, instanced: true, attrs: &INST_ATTRS }];
         let leaf = Pass::new(gpu.program("leaf", &defines, LEAF_V, LEAF_F, &leaf_streams, msaa, opaque)?, ["uLeaves", ""]);
         let ground = Pass::new(gpu.program("ground", &defines, GROUND_V, GROUND_F, &[Stream { stride: 16, instanced: false, attrs: &GROUND_ATTRS }], msaa, opaque)?, ["uGround", ""]);
+        let ground_night = Pass::new(gpu.program("ground_night", &format!("{defines}#define NIGHT\n"), GROUND_V, GROUND_F, &[Stream { stride: 16, instanced: false, attrs: &GROUND_ATTRS }], msaa, opaque)?, ["uGround", ""]);
 
         progress("Reading the city's geometry");
         let tags = [pack::VSOL, pack::VWAL, pack::VGND, pack::IDX0, pack::INST];
@@ -283,6 +295,28 @@ impl CityGpu {
         }
         up.free();
 
+        progress("Laying the lamps' light");
+        let lamp_bytes = p.read(pack::LAMP)?;
+        let head: pack::Heights = pack::read(&lamp_bytes, 0).ok_or("lamp record")?;
+        let texels = (head.w * head.h) as usize * 2;
+        if lamp_bytes.len() < 32 + texels {
+            return Err("the lamps' light is short".into());
+        }
+        let lamp_at = vram.alloc(texels, 512)?;
+        core::ptr::copy_nonoverlapping(lamp_bytes[32..].as_ptr(), lamp_at, texels);
+        let mut lamp: g::SceGxmTexture = core::mem::zeroed();
+        if g::sceGxmTextureInitLinear(&mut lamp, lamp_at.cast(), g::SceGxmTextureFormat_SCE_GXM_TEXTURE_FORMAT_U5U6U5_RGB, head.w, head.h, 1) < 0 {
+            return Err("lamp light texture".into());
+        }
+        g::sceGxmTextureSetMinFilter(&mut lamp, g::SceGxmTextureFilter_SCE_GXM_TEXTURE_FILTER_LINEAR);
+        g::sceGxmTextureSetMagFilter(&mut lamp, g::SceGxmTextureFilter_SCE_GXM_TEXTURE_FILTER_LINEAR);
+        g::sceGxmTextureSetUAddrMode(&mut lamp, g::SceGxmTextureAddrMode_SCE_GXM_TEXTURE_ADDR_CLAMP);
+        g::sceGxmTextureSetVAddrMode(&mut lamp, g::SceGxmTextureAddrMode_SCE_GXM_TEXTURE_ADDR_CLAMP);
+        let (sx, sz) = (1.0 / (head.w as f32 * head.step), 1.0 / (head.h as f32 * head.step));
+        let lamp_map = [sx, -head.x0 * sx, sz, -head.z0 * sz];
+        texture_bytes += texels;
+        drop(lamp_bytes);
+
         let largest = near_cells.iter().map(|c| c.size).max().unwrap_or(0) as usize;
         let (near_off, _) = p.range(pack::NEAR)?;
         let near = Near::new(&p.path, near_off as u64, largest.max(4096), NEAR_SLOTS)?;
@@ -307,7 +341,11 @@ impl CityGpu {
             inst,
             inst_open,
             ground,
+            ground_night,
             leaf,
+            lamp,
+            lamp_map,
+            lamp_unit: head.unit,
             items: Vec::with_capacity(4096),
             wanted: Vec::with_capacity(256),
             models,
@@ -320,7 +358,7 @@ impl CityGpu {
     ///
     /// # Safety
     /// Inside a scene on `ctx`.
-    pub unsafe fn draw(&mut self, ctx: *mut g::SceGxmContext, vp: &Mat4, eye: V3, frame: &[f32; 16], look: &[f32; 8], night: bool, shadow: &g::SceGxmTexture, show: &Show, frame_no: u32) -> Stats {
+    pub unsafe fn draw(&mut self, ctx: *mut g::SceGxmContext, vp: &Mat4, eye: V3, frame: &[f32; 16], look: &[f32; 12], night: bool, shadow: &g::SceGxmTexture, show: &Show, frame_no: u32) -> Stats {
         let planes = mat::planes(vp);
         let mut stats = Stats::default();
         let mut items = core::mem::take(&mut self.items);
@@ -377,12 +415,18 @@ impl CityGpu {
                 kind::SOLID => &self.solid,
                 kind::OPEN => &self.open,
                 kind::SOLID_INST => &self.inst,
-                kind::GROUND => &self.ground,
+                kind::GROUND => {
+                    if night {
+                        &self.ground_night
+                    } else {
+                        &self.ground
+                    }
+                }
                 kind::LEAF_INST => &self.leaf,
                 _ => &self.inst_open,
             };
             if current.map(|c| c.0) != Some(b.kind) {
-                pass.bind(ctx, shadow);
+                pass.bind(ctx, shadow, &self.lamp);
                 gpu::state_opaque(ctx, if matches!(b.kind, kind::OPEN | kind::OPEN_INST | kind::LEAF_INST) { Cull::None } else { Cull::Cw });
                 current = Some((b.kind, NO_TEX));
             }
@@ -412,6 +456,7 @@ impl CityGpu {
             }
             let v = Uniforms::vertex(ctx);
             v.set(pass.frame, frame);
+            v.set(pass.lamp_map, &self.lamp_map);
             let f = Uniforms::fragment(ctx);
             if b.kind == kind::WALL {
                 // The night page holds its emission over its scale; with no night page, nothing glows.
@@ -467,7 +512,7 @@ impl CityGpu {
     ///
     /// # Safety
     /// Inside a scene on `ctx`, after `draw` this frame.
-    pub unsafe fn draw_models(&mut self, ctx: *mut g::SceGxmContext, vp: &Mat4, frame: &[f32; 16], look: &[f32; 8], shadow: &g::SceGxmTexture, placed: &mut Vec<(usize, Instance)>) -> u32 {
+    pub unsafe fn draw_models(&mut self, ctx: *mut g::SceGxmContext, vp: &Mat4, frame: &[f32; 16], look: &[f32; 12], shadow: &g::SceGxmTexture, placed: &mut Vec<(usize, Instance)>) -> u32 {
         self.ring.next_frame();
         placed.sort_by_key(|p| p.0);
         placed.truncate(MODEL_INSTANCES);
@@ -485,7 +530,7 @@ impl CityGpu {
             for bi in model.first..model.first + model.count {
                 let b = self.batches[bi as usize];
                 let pass = if b.kind == kind::OPEN_INST { &self.inst_open } else { &self.inst };
-                pass.bind(ctx, shadow);
+                pass.bind(ctx, shadow, &self.lamp);
                 gpu::state_opaque(ctx, if b.kind == kind::OPEN_INST { Cull::None } else { Cull::Cw });
                 let v = Uniforms::vertex(ctx);
                 v.set(pass.frame, frame);

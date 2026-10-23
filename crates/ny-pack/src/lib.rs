@@ -30,6 +30,7 @@
 //! | `TDAT` | the pictures' levels, largest first, as `TexEntry` says |
 //! | `PRST` | `Preset` table: the hours the reference offers |
 //! | `HMAP` | `Heights`, then `u16` per cell of its grid, row by row from the north-west: the top of whatever stands there, in `Heights::unit` metres |
+//! | `LAMP` | `Heights` (its `unit`: the light a value of 31 in a channel stands for), then `u16` per cell, `r << 11 \| g << 5 \| b`: the light the street lamps leave on the ground by night |
 //! | `MODL` | `Model` table: what moves (traffic, the player's vehicles), each a range of instanced batches of `BTCH` |
 
 #![cfg_attr(not(feature = "std"), no_std)]
@@ -43,7 +44,7 @@ use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
 pub const MAGIC: u32 = u32::from_le_bytes(*b"NYPK");
-pub const VERSION: u32 = 8;
+pub const VERSION: u32 = 9;
 
 pub const fn tag(t: &[u8; 4]) -> u32 {
     u32::from_le_bytes(*t)
@@ -67,6 +68,7 @@ pub const TDAT: u32 = tag(b"TDAT");
 pub const PRST: u32 = tag(b"PRST");
 pub const MODL: u32 = tag(b"MODL");
 pub const HMAP: u32 = tag(b"HMAP");
+pub const LAMP: u32 = tag(b"LAMP");
 
 /// Levels of detail: near by cell, mid by block, far by region, and the cell's small things (detail).
 pub const LODS: usize = 4;

@@ -270,6 +270,7 @@ fn main() {
     let mut means: HashMap<(usize, usize, usize), [f32; 3]> = HashMap::new();
     let mut inst_colors: HashMap<usize, Vec<f32>> = HashMap::new();
     let mut tree_shapes: HashMap<usize, u32> = HashMap::new();
+    let mut lamps: Vec<([f32; 3], [f32; 3])> = Vec::new();
     // Triangles by level and by what they come from, for the receipt.
     let mut spend: HashMap<(usize, String), usize> = HashMap::new();
     for (oid, i, m, b) in &placed {
@@ -285,6 +286,22 @@ fn main() {
         let class = classes[*oid];
         // Across the rivers the city is seen from afar: no near level.
         let distant = o.path.starts_with("Boroughs/BoroughBuildings") || o.path.starts_with("Boroughs/BoroughIsland");
+        // A small thing that glows by night is a lamp: its light lies on the ground under it.
+        if class == Class::Solid && o.instances.is_some() && radius < 3.0 && b.max[1] > 2.0 {
+            if let Some(pr) = probe {
+                let mut sum = [0.0f32; 3];
+                for v in 0..pr.verts {
+                    let e = pr.emission(*i, v);
+                    for k in 0..3 {
+                        sum[k] += e[k];
+                    }
+                }
+                let mean = sum.map(|x| x / pr.verts.max(1) as f32);
+                if mean[0].max(mean[1]).max(mean[2]) > 0.4 {
+                    lamps.push((b.center(), mean));
+                }
+            }
+        }
         // What stands up casts shadows: a facade box by its footprint, anything else near by its triangles.
         if class == Class::Solid && !distant && radius >= profile.detail_radius && b.max[1] > 1.5 && b.radius() < 3000.0 {
             for (_, tris) in &src.lods[0] {
@@ -454,6 +471,7 @@ fn main() {
     pw.add(pack::PRST, pack::slice_bytes(&hours(&ir_dir)).to_vec());
     pw.add(pack::MODL, pack::slice_bytes(&model_table).to_vec());
     pw.add(pack::HMAP, heights.bytes());
+    pw.add(pack::LAMP, lamp_light(&heights, &lamps));
     pw.add(pack::TEXS, pack::slice_bytes(&textures.entries).to_vec());
     pw.add(pack::TDAT, textures.data.clone());
     sim::add(&mut pw, &ir_dir).unwrap_or_else(|e| panic!("{e}"));
@@ -556,8 +574,15 @@ fn vertices(src: &Source, tris: &[u32], probe: Option<&ir::Probe>, inst: usize, 
                         let a = pr.albedo(inst, vi);
                         let e = pr.emission(inst, vi);
                         if unlit {
+                            // An unlit surface by day is its day colour; by night its night colour (a lamp's lens) is its
+                            // light. One that does not change shines the same at every hour.
                             let lin = [geom::linear(a[0]), geom::linear(a[1]), geom::linear(a[2])];
-                            ([0, 0, 0, pack::GLOW_ALWAYS], glow_bytes(lin))
+                            let changes = (0..3).any(|k| (lin[k] - e[k]).abs() > 0.05);
+                            if changes {
+                                ([a[0], a[1], a[2], 0], glow_bytes(e))
+                            } else {
+                                ([0, 0, 0, pack::GLOW_ALWAYS], glow_bytes(lin))
+                            }
                         } else {
                             ([a[0], a[1], a[2], 0], glow_bytes(e))
                         }
@@ -743,4 +768,49 @@ fn uncover(q: &mut facade::Quad, heights: &heights::Grid, trim: bool) -> bool {
         }
     }
     true
+}
+
+/// The light the lamps leave on the ground by night, over the grid of heights at twice its cell: each lamp a pool as
+/// wide as it stands high (and a third more), brightest under it, in its own colour.
+fn lamp_light(heights: &heights::Grid, lamps: &[([f32; 3], [f32; 3])]) -> Vec<u8> {
+    let h = &heights.head;
+    let step = h.step * 2.0;
+    let (w, d) = (h.w.div_ceil(2), h.h.div_ceil(2));
+    let mut light = vec![[0.0f32; 3]; (w * d) as usize];
+    for (p, color) in lamps {
+        let top = color[0].max(color[1]).max(color[2]).max(1e-3);
+        let tint = color.map(|c| c / top);
+        let ground = 0.0f32;
+        let r = ((p[1] - ground) * 1.3).clamp(5.0, 14.0);
+        let (cx, cz) = ((p[0] - h.x0) / step, (p[2] - h.z0) / step);
+        let cells = (r / step).ceil() as i32;
+        for j in -cells..=cells {
+            for i in -cells..=cells {
+                let (x, z) = (cx.floor() as i32 + i, cz.floor() as i32 + j);
+                if x < 0 || z < 0 || x >= w as i32 || z >= d as i32 {
+                    continue;
+                }
+                let (wx, wz) = (h.x0 + (x as f32 + 0.5) * step, h.z0 + (z as f32 + 0.5) * step);
+                let dd = ((wx - p[0]).powi(2) + (wz - p[2]).powi(2)).sqrt() / r;
+                if dd >= 1.0 {
+                    continue;
+                }
+                let f = (1.0 - dd * dd).powi(2) * 0.55;
+                let cell = &mut light[(z as u32 * w + x as u32) as usize];
+                for k in 0..3 {
+                    cell[k] += tint[k] * f;
+                }
+            }
+        }
+    }
+    // The light a channel's 31 (63 for green) stands for.
+    const FULL: f32 = 1.2;
+    let mut out = ny_pack::bytes_of(&ny_pack::Heights { x0: h.x0, z0: h.z0, step, unit: FULL, w, h: d, pad: [0; 2] }).to_vec();
+    for c in &light {
+        let q = |v: f32, max: f32| ((v / FULL).clamp(0.0, 1.0) * max).round() as u16;
+        let v = q(c[0], 31.0) << 11 | q(c[1], 63.0) << 5 | q(c[2], 31.0);
+        out.extend_from_slice(&v.to_le_bytes());
+    }
+    eprintln!("lamps: {} lights in a grid of {} × {} cells of {} m", lamps.len(), w, d, step);
+    out
 }

@@ -10,10 +10,12 @@ void main(
     uniform float4 uFrame[4],
     // x: repeats of the picture per metre; yz: their offset, from the draw's own origin (small numbers stay exact)
     uniform float4 uTile,
+    uniform float4 uLampMap,
     out float4 oPosition : POSITION,
     out float2 oUv : TEXCOORD0,
     out float2 oMap : TEXCOORD1,
     out float oHeight : TEXCOORD2,
+    out float2 oLamp : TEXCOORD3,
     out float4 oLight : COLOR0,
     out float4 oTint : COLOR1)
 {
@@ -22,6 +24,7 @@ void main(
     oUv = world.xz * uTile.x + uTile.yz;
     oMap = shadow_map(world, aNormal, uFrame);
     oHeight = world.y;
+    oLamp = world.xz * uLampMap.xz + uLampMap.yw;
     oLight = float4(hemi(aNormal, uFrame) * aAo, max(dot(aNormal, uFrame[0].xyz), 0.0));
     oTint = float4(aTint.rgb * 2.0, haze_of(oPosition.w, uFrame));
 }

@@ -50,7 +50,7 @@ export async function exportScene(argv: string[]) {
 
   await serveDetached();
   const query = new URLSearchParams({ sink: `http://127.0.0.1:${SINK}` });
-  for (const k of ["only", "at", "size"]) if (arg(k)) query.set(k, arg(k)!);
+  for (const k of ["only", "at", "size", "debug"]) if (arg(k)) query.set(k, arg(k)!);
   const browser = await chromium.launch({
     channel: "chrome",
     headless: !argv.includes("--headed"),

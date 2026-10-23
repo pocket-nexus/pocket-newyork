@@ -414,7 +414,7 @@ fn display(c: [f32; 3]) -> [f32; 3] {
 }
 
 /// The hour's light as the scene programs take it (`shaders/frame.cg`).
-fn frame_light(p: &Preset) -> ([f32; 16], [f32; 8], [f32; 16], bool) {
+fn frame_light(p: &Preset, lamp_unit: f32) -> ([f32; 16], [f32; 12], [f32; 16], bool) {
     // The reference lights in linear light under ACES; here a lit face is its colour times light in the display's
     // space. A face full in the golden-hour sun reads about 1.1 of its colour, one in shade about 0.55.
     const SUN: f32 = 0.19;
@@ -440,7 +440,8 @@ fn frame_light(p: &Preset) -> ([f32; 16], [f32; 8], [f32; 16], bool) {
         1.0, 0.0, 0.0, 0.0,
     ];
     let fog = display(p.fog);
-    let look = [fog[0], fog[1], fog[2], 0.0, sun[0], sun[1], sun[2], 0.0];
+    // [2].x: the lamps' light, as a texel's full value stands for, as far as the lamps are on.
+    let look = [fog[0], fog[1], fog[2], 0.0, sun[0], sun[1], sun[2], 0.0, lamp_unit * glow / city::LIGHT_SCALE, 0.0, 0.0, 0.0];
     let top = display(p.sky_top);
     let horizon = display(p.sky_horizon);
     let s = display(sun_c);
@@ -636,7 +637,7 @@ fn main() {
             let aspect = 960.0 / 544.0;
             let vp = mat::mul(&mat::perspective(fov, aspect, 0.4, 30000.0), &mat::view(eye, look_dir));
             let preset = &presets[game.hour.index()];
-            let (mut frame, look, sky_f, night) = frame_light(preset);
+            let (mut frame, look, sky_f, night) = frame_light(preset, city.lamp_unit);
             let sun = preset.sun_dir;
             shadows.update(v3(sun[0], sun[1], sun[2]), eye);
             let map = shadows.mapping();

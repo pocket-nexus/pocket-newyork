@@ -1,7 +1,7 @@
 uniform sampler2D uLeaves;
 uniform sampler2D uShadow;
 // [0] rgb: the haze. [1] rgb: the sun
-uniform float4 uLook[2];
+uniform float4 uLook[3];
 
 half4 main(float2 vUv : TEXCOORD0, float2 vMap : TEXCOORD1, float vHeight : TEXCOORD2, float vLeaf : TEXCOORD3, half4 vLight : COLOR0, half4 vColor : COLOR1) : COLOR
 {
