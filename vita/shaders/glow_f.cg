@@ -1,0 +1,9 @@
+// What is bright in the frame before this one, spread around and added to this one. uGlow.x: its strength.
+
+uniform sampler2D uBloom;
+uniform float4 uGlow;
+
+half4 main(float2 vUv0 : TEXCOORD0) : COLOR
+{
+    return half4((half3)tex2D(uBloom, vUv0).rgb * (half)uGlow.x, 1.0);
+}

@@ -1,0 +1,11 @@
+// One direction of a Gaussian blur: five bilinear taps stand for nine texels.
+
+uniform sampler2D uSource;
+
+half4 main(float2 vUv0 : TEXCOORD0, float2 vUv1 : TEXCOORD1, float2 vUv2 : TEXCOORD2, float2 vUv3 : TEXCOORD3, float2 vUv4 : TEXCOORD4) : COLOR
+{
+    half3 c = (half3)tex2D(uSource, vUv0).rgb * (half)0.2270
+        + ((half3)tex2D(uSource, vUv1).rgb + (half3)tex2D(uSource, vUv2).rgb) * (half)0.3162
+        + ((half3)tex2D(uSource, vUv3).rgb + (half3)tex2D(uSource, vUv4).rgb) * (half)0.0703;
+    return half4(c, 1.0);
+}

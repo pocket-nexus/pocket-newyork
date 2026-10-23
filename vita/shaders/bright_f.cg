@@ -1,0 +1,13 @@
+// Quarter-size copy of the scene keeping what is bright: four bilinear taps
+// cover a 4 x 4 block; uParams.x is the threshold, uParams.y the slope above it.
+
+uniform sampler2D uSource;
+uniform float4 uParams;
+
+half4 main(float2 vUv0 : TEXCOORD0, float2 vUv1 : TEXCOORD1, float2 vUv2 : TEXCOORD2, float2 vUv3 : TEXCOORD3) : COLOR
+{
+    half3 c = ((half3)tex2D(uSource, vUv0).rgb + (half3)tex2D(uSource, vUv1).rgb + (half3)tex2D(uSource, vUv2).rgb + (half3)tex2D(uSource, vUv3).rgb) * (half)0.25;
+    half l = dot(c, half3(0.30, 0.59, 0.11));
+    half k = saturate((l - (half)uParams.x) * (half)uParams.y);
+    return half4(c * k, 1.0);
+}

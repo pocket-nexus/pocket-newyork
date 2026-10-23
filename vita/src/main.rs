@@ -11,6 +11,7 @@
 //! frame timings under `engine`.
 
 mod city;
+mod glow;
 mod gpu;
 mod hostfs;
 mod interface;
@@ -510,14 +511,16 @@ fn main() {
             let shadow_unit = 65535.0 * heights.unit;
             let city = CityGpu::load(&mut p, &mut gpu, &mut vram, msaa, shadow_unit, |line| shell.frame(Mode::Loading, line))?;
             let sky = sky::Sky::new(&mut gpu, msaa)?;
+            let mut targets = Arena::new(Kind::Main, 4 * 1024 * 1024);
+            let glow = glow::Glow::new(&mut gpu, &mut vram, &mut targets, msaa)?;
             gpu.finish();
             shell.frame(Mode::Loading, "Casting the first shadows");
             let start = &world.entities[1];
             let sun = presets[0].sun_dir;
             let shadows = shadow::Shadows::new(&mut vram, pack_path, heights, (p.range(ny_pack::HMAP)?.0 + 32) as u64, v3(sun[0], sun[1], sun[2]), v3(start.pos[0], start.pos[1], start.pos[2]))?;
-            Ok((meta, presets, world, gpu, city, vram, sky, shadows))
+            Ok((meta, presets, world, gpu, city, vram, sky, shadows, glow, targets))
         })();
-        let (meta, presets, world, gpu, mut city, vram, sky, mut shadows) = match loaded {
+        let (meta, presets, world, gpu, mut city, vram, sky, mut shadows, mut glow, _targets) = match loaded {
             Ok(x) => x,
             Err(e) => shell.fail(e),
         };
@@ -652,6 +655,11 @@ fn main() {
             // This slot's vertices were last used two frames ago: the GPU must be done with them.
             fence.wait(slot);
             let waited = t2.elapsed();
+            // By night, what is bright in the frame on display glows over this one.
+            let glow_gain = frame[7] * 0.6;
+            if let Err(e) = glow.run(ctx, glow_gain, 0.72, g::vita2d_get_current_fb(), 960) {
+                pocketjs_vita::vita_log(format_args!("newyork: {e}"));
+            }
             g::vita2d_pool_reset();
             if slot == 1 {
                 g::vita2d_pool_malloc(POOL_BYTES / 2);
@@ -711,6 +719,7 @@ fn main() {
                 }
             }
             stats.tris[2] += city.draw_models(ctx, &vp, &frame, &look, shadows.texture(), &mut placed);
+            glow.add(ctx, glow_gain);
             // vita2d draws (the interface, the menu) expect its own viewport and no depth.
             g::sceGxmSetViewport(ctx, 480.0, 480.0, 272.0, -272.0, 0.5, 0.5);
             gpu::state_overlay(ctx, false);

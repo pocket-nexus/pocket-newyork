@@ -1,0 +1,29 @@
+// Full-screen pass. Every texture coordinate a fragment program reads is an
+// affine function of the screen position, so it is computed here: uTap[k]
+// holds a scale (xy) and an offset (zw) per tap. A blur shifts the taps by
+// texels; a radial effect scales them about a point.
+
+void main(
+    float2 aPosition,
+    uniform float4 uTap[8],
+    out float4 oPosition : POSITION,
+    out float2 oUv0 : TEXCOORD0,
+    out float2 oUv1 : TEXCOORD1,
+    out float2 oUv2 : TEXCOORD2,
+    out float2 oUv3 : TEXCOORD3,
+    out float2 oUv4 : TEXCOORD4,
+    out float2 oUv5 : TEXCOORD5,
+    out float2 oUv6 : TEXCOORD6,
+    out float2 oUv7 : TEXCOORD7)
+{
+    oPosition = float4(aPosition, 0.0, 1.0);
+    float2 uv = float2(aPosition.x * 0.5 + 0.5, 0.5 - aPosition.y * 0.5);
+    oUv0 = uv * uTap[0].xy + uTap[0].zw;
+    oUv1 = uv * uTap[1].xy + uTap[1].zw;
+    oUv2 = uv * uTap[2].xy + uTap[2].zw;
+    oUv3 = uv * uTap[3].xy + uTap[3].zw;
+    oUv4 = uv * uTap[4].xy + uTap[4].zw;
+    oUv5 = uv * uTap[5].xy + uTap[5].zw;
+    oUv6 = uv * uTap[6].xy + uTap[6].zw;
+    oUv7 = uv * uTap[7].xy + uTap[7].zw;
+}
