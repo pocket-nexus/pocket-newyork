@@ -13,7 +13,8 @@ import { dirname, join, normalize, resolve } from "node:path";
 
 export const ROOT = resolve(import.meta.dir, "..");
 export const WEB = join(ROOT, "web");
-export const PORT = 5390;
+/** The web server's port; a second checkout running beside this one sets NY_WEB_PORT (and NY_SINK_PORT). */
+export const PORT = Number(process.env.NY_WEB_PORT ?? 5390);
 
 /** mrdoob/three.js dev on 2026-10-22 06:30 UTC, the last commit before the reference's last push (07:25 UTC). */
 export const THREE_COMMIT = "bc7d0b3c3838d5da9495b5e603afd77ed3154d57";

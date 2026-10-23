@@ -8,7 +8,7 @@ import { join } from "node:path";
 import { chromium } from "playwright-core";
 import { PORT, ROOT, serveDetached } from "./web";
 
-const SINK = 5391;
+const SINK = Number(process.env.NY_SINK_PORT ?? 5391);
 
 export function irDir(): string {
   return join(ROOT, ".pocket-build/scene/ir");
