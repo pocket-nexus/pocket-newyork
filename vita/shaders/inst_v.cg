@@ -14,11 +14,13 @@ void main(
     uniform float4x4 uVp,
     uniform float4 uBox[2],
     uniform float4 uFrame[6],
+    uniform float4x4 uSunVp,
 #ifdef NIGHT
     uniform float4 uLampMap,
     out float3 oLamp : TEXCOORD3,
 #endif
     out float4 oPosition : POSITION,
+    out float4 oSun : TEXCOORD6,
     out float2 oMap : TEXCOORD1,
     out float oHeight : TEXCOORD2,
     out half4 oSpec : TEXCOORD4,
@@ -32,6 +34,7 @@ void main(
     float3 n = normalize(float3(dot(aRow0.xyz, aNormal), dot(aRow1.xyz, aNormal), dot(aRow2.xyz, aNormal)));
     oMap = shadow_map(world, n, uFrame);
     oHeight = world.y;
+    oSun = sun_at(world, uSunVp);
 #ifdef OPEN
     float sun = abs(dot(n, uFrame[0].xyz)) * 0.8 + 0.2;
 #else

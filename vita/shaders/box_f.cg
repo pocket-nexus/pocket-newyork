@@ -1,6 +1,7 @@
 uniform sampler2D uPicture;
 uniform sampler2D uNight;
 uniform sampler2D uShadow;
+uniform sampler2D uSun;
 #ifdef NIGHT
 uniform sampler2D uLamp;
 uniform sampler2D uAround;
@@ -8,7 +9,7 @@ uniform sampler2D uAround;
 // See frame.cg; [1].a: what the car emits by night over its glow picture's scale
 uniform float4 uLook[3];
 
-half4 main(float3 vAt : TEXCOORD0, float2 vMap : TEXCOORD1, float vHeight : TEXCOORD2, half4 vSpec : TEXCOORD4, half3 vFacing : TEXCOORD5,
+half4 main(float4 vSun : TEXCOORD6, float3 vAt : TEXCOORD0, float2 vMap : TEXCOORD1, float vHeight : TEXCOORD2, half4 vSpec : TEXCOORD4, half3 vFacing : TEXCOORD5,
 #ifdef NIGHT
     float3 vLamp : TEXCOORD3,
 #endif
@@ -26,7 +27,7 @@ half4 main(float3 vAt : TEXCOORD0, float2 vMap : TEXCOORD1, float vHeight : TEXC
         uv = float2(at.x * 0.5 + (vFacing.z > 0.0 ? 0.0 : 0.5), at.y * 0.25 + 0.5);
     half4 t = (half4)tex2D(uPicture, uv);
     half3 a = t.rgb * lerp(half3(1.0, 1.0, 1.0), vPaint.rgb, t.a);
-    half lit = (half)saturate((vHeight - tex2D(uShadow, vMap).r * SHADOW_UNIT) * SHADOW_K + 1.0);
+    half lit = sun_lit((half)saturate((vHeight - tex2D(uShadow, vMap).r * SHADOW_UNIT) * SHADOW_K + 1.0), vSun, uSun);
     half3 light = vLight.rgb + (half3)uLook[1].rgb * (vLight.a * lit);
 #ifdef NIGHT
     light += lamps((half3)tex2D(uLamp, vLamp.xy).rgb, (half3)tex2D(uAround, vLamp.xy).rgb, vLamp.z, uLook);

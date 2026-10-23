@@ -1,5 +1,6 @@
 uniform sampler2D uLeaves;
 uniform sampler2D uShadow;
+uniform sampler2D uSun;
 #ifdef NIGHT
 uniform sampler2D uLamp;
 uniform sampler2D uAround;
@@ -7,7 +8,7 @@ uniform sampler2D uAround;
 // See frame.cg
 uniform float4 uLook[3];
 
-half4 main(float2 vUv : TEXCOORD0, float2 vMap : TEXCOORD1, float vHeight : TEXCOORD2, float vLeaf : TEXCOORD3,
+half4 main(float4 vSun : TEXCOORD6, float2 vUv : TEXCOORD0, float2 vMap : TEXCOORD1, float vHeight : TEXCOORD2, float vLeaf : TEXCOORD3,
 #ifdef NIGHT
     float3 vLamp : TEXCOORD5,
 #endif
@@ -18,7 +19,7 @@ half4 main(float2 vUv : TEXCOORD0, float2 vMap : TEXCOORD1, float vHeight : TEXC
     half4 leaf = lerp(half4(1.0, 1.0, 1.0, 1.0), t, (half)vLeaf);
     if (leaf.a < 0.5)
         discard;
-    half lit = (half)saturate((vHeight - tex2D(uShadow, vMap).r * SHADOW_UNIT) * SHADOW_K + 1.0);
+    half lit = sun_lit((half)saturate((vHeight - tex2D(uShadow, vMap).r * SHADOW_UNIT) * SHADOW_K + 1.0), vSun, uSun);
     half3 light = vLight.rgb + (half3)uLook[1].rgb * (vLight.a * lit);
 #ifdef NIGHT
     light += lamps((half3)tex2D(uLamp, vLamp.xy).rgb, (half3)tex2D(uAround, vLamp.xy).rgb, vLamp.z, uLook);

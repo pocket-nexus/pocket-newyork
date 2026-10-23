@@ -53,6 +53,15 @@ half4 reflection(float3 world, float3 n, float2 gloss, float4 frame[6])
     return half4(env * f, 1.0 - gloss.y);
 }
 
+// Where a point is in the sun's depth map (uSunVp: from world to the map's x, y and depth, each 0..1 within it), and
+// how much the map counts there (w: all of it inside, nothing past its edges, where the height grid shades alone).
+float4 sun_at(float3 world, float4x4 sun)
+{
+    float4 s = mul(sun, float4(world, 1.0));
+    float2 off = abs(s.xy - 0.5);
+    return float4(s.xyz, saturate((0.5 - max(off.x, off.y)) * 12.0));
+}
+
 // Light on a face from the sky and the ground, by which way it looks.
 float3 hemi(float3 n, float4 frame[6])
 {
@@ -64,6 +73,18 @@ float3 hemi(float3 n, float4 frame[6])
 float2 shadow_map(float3 world, float3 n, float4 frame[6])
 {
     return (world.xz + n.xz * SHADOW_OUT) * frame[3].y + frame[3].zw;
+}
+
+// How much sun reaches a fragment: the height grid's shadow (`grid`) and, where the sun's depth map counts, whether
+// anything nearer the sun stands over it there.
+half sun_lit(half grid, float4 at, sampler2D map)
+{
+    half seen = (half)step(at.z - SUN_BIAS, tex2D(map, at.xy).r);
+#ifdef PROBE_SUN
+    // (the map alone, and black where it does not reach)
+    return seen * (half)step(0.5, at.w);
+#endif
+    return min(grid, lerp((half)1.0, seen, (half)at.w));
 }
 
 // By night, the lamps' light at a point: what they leave under them (uLamp) and, as the street and its storefronts

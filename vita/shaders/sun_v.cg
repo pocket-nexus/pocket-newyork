@@ -1,0 +1,32 @@
+// The sun's depth map: what a shape is, seen from the sun (uSunVp: from world to the map's x, y and depth). A
+// shape's own points (a cell's walls, solids, signs), or INSTANCED at the instances of a second stream; LEAF: a
+// tree's cards, their texture coordinates for the cut.
+
+void main(
+    float3 aPosition,
+#ifdef LEAF
+    float2 aUv,
+    float4 aBark,
+#endif
+#ifdef INSTANCED
+    float4 aRow0,
+    float4 aRow1,
+    float4 aRow2,
+#endif
+    uniform float4x4 uSunVp,
+    uniform float4 uBox[2],
+    out float4 oPosition : POSITION
+#ifdef LEAF
+    , out float3 oUv : TEXCOORD0
+#endif
+    )
+{
+    float4 p = float4(aPosition * uBox[1].xyz + uBox[0].xyz, 1.0);
+#ifdef INSTANCED
+    p = float4(dot(aRow0, p), dot(aRow1, p), dot(aRow2, p), 1.0);
+#endif
+    oPosition = mul(uSunVp, p);
+#ifdef LEAF
+    oUv = float3(aUv * UV_RANGE, aBark.a);
+#endif
+}

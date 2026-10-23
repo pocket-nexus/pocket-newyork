@@ -18,7 +18,9 @@ void main(
     uniform float4 uBox[2],
     uniform float4 uGloss,
     uniform float4 uFrame[6],
+    uniform float4x4 uSunVp,
     out float4 oPosition : POSITION,
+    out float4 oSun : TEXCOORD6,
     out float2 oUv : TEXCOORD0,
     out float2 oMap : TEXCOORD1,
     out float oHeight : TEXCOORD2,
@@ -39,6 +41,7 @@ void main(
     oUv = aUv * UV_RANGE;
     oMap = shadow_map(world, n, uFrame);
     oHeight = world.y;
+    oSun = sun_at(world, uSunVp);
     float4 lit = float4(hemi(n, uFrame) * aAo, max(dot(n, uFrame[0].xyz), 0.0));
     // Unlit: the picture as it is, day and night; and it reflects nothing either.
     float4 unlit = float4(1.0 / LIGHT_SCALE, 1.0 / LIGHT_SCALE, 1.0 / LIGHT_SCALE, 0.0);

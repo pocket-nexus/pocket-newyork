@@ -1,4 +1,5 @@
 uniform sampler2D uShadow;
+uniform sampler2D uSun;
 #ifdef NIGHT
 uniform sampler2D uLamp;
 uniform sampler2D uAround;
@@ -6,13 +7,13 @@ uniform sampler2D uAround;
 // See frame.cg
 uniform float4 uLook[3];
 
-half4 main(float2 vMap : TEXCOORD1, float vHeight : TEXCOORD2, half4 vSpec : TEXCOORD4,
+half4 main(float4 vSun : TEXCOORD6, float2 vMap : TEXCOORD1, float vHeight : TEXCOORD2, half4 vSpec : TEXCOORD4,
 #ifdef NIGHT
     float3 vLamp : TEXCOORD3,
 #endif
     half4 vLight : COLOR0, half4 vColor : COLOR1, half4 vGlow : TEXCOORD0) : COLOR
 {
-    half lit = (half)saturate((vHeight - tex2D(uShadow, vMap).r * SHADOW_UNIT) * SHADOW_K + 1.0);
+    half lit = sun_lit((half)saturate((vHeight - tex2D(uShadow, vMap).r * SHADOW_UNIT) * SHADOW_K + 1.0), vSun, uSun);
     half3 light = vLight.rgb + (half3)uLook[1].rgb * (vLight.a * lit);
 #ifdef NIGHT
     light += lamps((half3)tex2D(uLamp, vLamp.xy).rgb, (half3)tex2D(uAround, vLamp.xy).rgb, vLamp.z, uLook);

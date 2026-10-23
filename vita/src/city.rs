@@ -17,6 +17,7 @@ use vita2d_sys as g;
 use crate::gpu::{self, Blend, Cull, Gpu, Param, Program, Stream, Uniforms};
 use crate::mat::{self, Mat4};
 use crate::near::Near;
+use crate::sunmap::SunMap;
 
 const FRAME: &str = include_str!("../shaders/frame.cg");
 const WALL_V: &str = include_str!("../shaders/wall_v.cg");
@@ -30,6 +31,8 @@ const LEAF_F: &str = include_str!("../shaders/leaf_f.cg");
 const GROUND_F: &str = include_str!("../shaders/ground_f.cg");
 const PICTURE_V: &str = include_str!("../shaders/picture_v.cg");
 const BOX_V: &str = include_str!("../shaders/box_v.cg");
+const SUN_V: &str = include_str!("../shaders/sun_v.cg");
+const SUN_F: &str = include_str!("../shaders/sun_f.cg");
 const BOX_F: &str = include_str!("../shaders/box_f.cg");
 const PICTURE_F: &str = include_str!("../shaders/picture_f.cg");
 
@@ -148,6 +151,9 @@ struct Pass {
     lamp_map: Param,
     lamp: Option<u32>,
     around: Option<u32>,
+    /// The sun's depth map: from world to it, and its sampler.
+    sun_vp: Param,
+    sun: Option<u32>,
     vp: Param,
     bx: Param,
     frame: Param,
@@ -161,11 +167,14 @@ struct Pass {
 impl Pass {
     unsafe fn new(prog: Program, pictures: [&str; 2]) -> Pass {
         let units = pictures.map(|name| if name.is_empty() { 0 } else { prog.fs.sampler_index(name).unwrap_or(0) });
-        Pass { mvp: prog.vs.param("uMvp"), tile: prog.vs.param("uTile"), lamp_map: prog.vs.param("uLampMap"), lamp: prog.fs.sampler_index("uLamp"), around: prog.fs.sampler_index("uAround"), vp: prog.vs.param("uVp"), bx: prog.vs.param("uBox"), frame: prog.vs.param("uFrame"), look: prog.fs.param("uLook"), gloss: prog.vs.param("uGloss"), bake: prog.vs.param("uBake"), units, shadow: prog.fs.sampler_index("uShadow"), prog }
+        Pass { mvp: prog.vs.param("uMvp"), tile: prog.vs.param("uTile"), lamp_map: prog.vs.param("uLampMap"), lamp: prog.fs.sampler_index("uLamp"), around: prog.fs.sampler_index("uAround"), sun_vp: prog.vs.param("uSunVp"), sun: prog.fs.sampler_index("uSun"), vp: prog.vs.param("uVp"), bx: prog.vs.param("uBox"), frame: prog.vs.param("uFrame"), look: prog.fs.param("uLook"), gloss: prog.vs.param("uGloss"), bake: prog.vs.param("uBake"), units, shadow: prog.fs.sampler_index("uShadow"), prog }
     }
 
     /// Binds the program, the shadow window and the lamps' light (under them, and around).
-    unsafe fn bind(&self, ctx: *mut g::SceGxmContext, shadow: &g::SceGxmTexture, lamp: &g::SceGxmTexture, around: &g::SceGxmTexture) {
+    unsafe fn bind(&self, ctx: *mut g::SceGxmContext, shadow: &g::SceGxmTexture, lamp: &g::SceGxmTexture, around: &g::SceGxmTexture, sun: &g::SceGxmTexture) {
+        if let Some(unit) = self.sun {
+            g::sceGxmSetFragmentTexture(ctx, unit, sun);
+        }
         self.prog.bind(ctx, false);
         if let Some(unit) = self.shadow {
             g::sceGxmSetFragmentTexture(ctx, unit, shadow);
@@ -237,6 +246,10 @@ pub struct CityGpu {
     /// Cars under their pictures (`kind::BOXED_INST`), by day and by night.
     boxed: Pass,
     boxed_night: Pass,
+    /// Into the sun's depth map: a shape's points, a shape at instances, a tree's cut cards.
+    sun_solid: Pass,
+    sun_inst: Pass,
+    sun_leaf: Pass,
     picture: Pass,
     picture_inst: Pass,
     /// The lamps' light on the ground by night, and from world x and z to its texture coordinates; and that light
@@ -260,7 +273,7 @@ pub struct CityGpu {
 /// development build's boot switches add, for measurements.)
 pub fn scene_defines(shadow_unit: f32, extra: &str) -> String {
     format!(
-        "{extra}#define AROUND 0.5\n#define UV_RANGE {:.1}\n#define LIGHT_SCALE {LIGHT_SCALE:.1}\n#define GLOW_RANGE {:.1}\n#define SHADOW_UNIT {shadow_unit:.3}\n#define SHADOW_K {:.3}\n#define SHADOW_OUT {SHADOW_OUT:.1}\n{FRAME}",
+        "{extra}#define AROUND 0.5\n#define SUN_BIAS 0.0004\n#define UV_RANGE {:.1}\n#define LIGHT_SCALE {LIGHT_SCALE:.1}\n#define GLOW_RANGE {:.1}\n#define SHADOW_UNIT {shadow_unit:.3}\n#define SHADOW_K {:.3}\n#define SHADOW_OUT {SHADOW_OUT:.1}\n{FRAME}",
         pack::UV_RANGE,
         pack::GLOW_RANGE,
         1.0 / SHADOW_SOFT
@@ -315,6 +328,14 @@ impl CityGpu {
         let leaf_night = Pass::new(gpu.program("leaf_night", &night, LEAF_V, LEAF_F, &leaf_streams, msaa, opaque)?, ["uLeaves", ""]);
         let boxed = Pass::new(gpu.program("boxed", &defines, BOX_V, BOX_F, &inst_streams, msaa, opaque)?, ["uPicture", "uNight"]);
         let boxed_night = Pass::new(gpu.program("boxed_night", &night, BOX_V, BOX_F, &inst_streams, msaa, opaque)?, ["uPicture", "uNight"]);
+        const SUN_ATTRS: [(&str, u16, u32, u8); 1] = [("aPosition", 0, U16N, 3)];
+        const SUN_LEAF_ATTRS: [(&str, u16, u32, u8); 3] = [("aPosition", 0, U16N, 3), ("aUv", 10, S16N, 2), ("aBark", 14, U8N, 4)];
+        let sun_one = [Stream { stride: 20, instanced: false, attrs: &SUN_ATTRS }];
+        let sun_many = [Stream { stride: 20, instanced: false, attrs: &SUN_ATTRS }, Stream { stride: 52, instanced: true, attrs: &INST_ATTRS[..3] }];
+        let sun_cards = [Stream { stride: 20, instanced: false, attrs: &SUN_LEAF_ATTRS }, Stream { stride: 52, instanced: true, attrs: &INST_ATTRS[..3] }];
+        let sun_solid = Pass::new(gpu.program("sun", &defines, SUN_V, SUN_F, &sun_one, 0, opaque)?, ["", ""]);
+        let sun_inst = Pass::new(gpu.program("sun_inst", &format!("{defines}#define INSTANCED\n"), SUN_V, SUN_F, &sun_many, 0, opaque)?, ["", ""]);
+        let sun_leaf = Pass::new(gpu.program("sun_leaf", &format!("{defines}#define INSTANCED\n#define LEAF\n"), SUN_V, SUN_F, &sun_cards, 0, opaque)?, ["uLeaves", ""]);
         let picture_stream = [Stream { stride: 20, instanced: false, attrs: &PICTURE_ATTRS }];
         let picture_streams = [Stream { stride: 20, instanced: false, attrs: &PICTURE_ATTRS }, Stream { stride: 52, instanced: true, attrs: &INST_ATTRS[..3] }];
         let picture = Pass::new(gpu.program("picture", &defines, PICTURE_V, PICTURE_F, &picture_stream, msaa, opaque)?, ["uPicture", ""]);
@@ -471,6 +492,9 @@ impl CityGpu {
             leaf_night,
             boxed,
             boxed_night,
+            sun_solid,
+            sun_inst,
+            sun_leaf,
             picture,
             picture_inst,
             lamp,
@@ -489,7 +513,7 @@ impl CityGpu {
     ///
     /// # Safety
     /// Inside a scene on `ctx`.
-    pub unsafe fn draw(&mut self, ctx: *mut g::SceGxmContext, vp: &Mat4, eye: V3, frame: &Frame, look: &[f32; 12], haze: &Haze, night: bool, shadow: &g::SceGxmTexture, show: &Show, frame_no: u32) -> Stats {
+    pub unsafe fn draw(&mut self, ctx: *mut g::SceGxmContext, vp: &Mat4, eye: V3, frame: &Frame, look: &[f32; 12], haze: &Haze, night: bool, shadow: &g::SceGxmTexture, sun: &SunMap, show: &Show, frame_no: u32) -> Stats {
         let planes = mat::planes(vp);
         let mut stats = Stats::default();
         let mut items = core::mem::take(&mut self.items);
@@ -560,7 +584,7 @@ impl CityGpu {
                 _ => if night { &self.inst_open_night } else { &self.inst_open },
             };
             if current.map(|c| c.0) != Some(b.kind) {
-                pass.bind(ctx, shadow, &self.lamp, &self.around);
+                pass.bind(ctx, shadow, &self.lamp, &self.around, sun.texture());
                 gpu::state_opaque(ctx, if matches!(b.kind, kind::OPEN | kind::OPEN_INST | kind::LEAF_INST | kind::PICTURE | kind::PICTURE_INST) { Cull::None } else { Cull::Cw });
                 current = Some((b.kind, NO_TEX));
             }
@@ -590,6 +614,7 @@ impl CityGpu {
             }
             let v = Uniforms::vertex(ctx);
             v.set(pass.lamp_map, &self.lamp_map);
+            v.set(pass.sun_vp, &sun.read);
             if matches!(b.kind, kind::WALL | kind::GROUND | kind::PICTURE | kind::PICTURE_INST) {
                 let g = self.texs.get(b.tex as usize).map(|e| e.gloss).unwrap_or([204, 0, 0, 0]);
                 v.set(pass.gloss, &[g[0] as f32 / 255.0, g[1] as f32 / 255.0, 0.0, 0.0]);
@@ -659,15 +684,13 @@ impl CityGpu {
         self.models.iter().position(|m| m.name() == name)
     }
 
-    /// Draws models where the game puts them: `(model, instance)` pairs, any order.
-    ///
-    /// # Safety
-    /// Inside a scene on `ctx`, after `draw` this frame.
-    pub unsafe fn draw_models(&mut self, ctx: *mut g::SceGxmContext, vp: &Mat4, frame: &Frame, look: &[f32; 12], haze: &Haze, night: bool, shadow: &g::SceGxmTexture, placed: &mut Vec<(usize, Instance)>) -> u32 {
+    /// Writes this frame's instances of the models where the game puts them (`(model, instance)` pairs, any order) to
+    /// the ring: one group per model, its instances' buffer and count, and where its first stands.
+    pub unsafe fn prepare_models(&mut self, placed: &mut Vec<(usize, Instance)>) -> Vec<ModelGroup> {
         self.ring.next_frame();
         placed.sort_by_key(|p| p.0);
         placed.truncate(MODEL_INSTANCES);
-        let mut tris = 0;
+        let mut out = Vec::new();
         let mut at = 0;
         while at < placed.len() {
             let m = placed[at].0;
@@ -677,7 +700,22 @@ impl CityGpu {
             for (k, p) in placed[at..end].iter().enumerate() {
                 core::ptr::write_unaligned(buf.add(k * 52).cast::<Instance>(), p.1);
             }
-            let model = self.models[m];
+            let r = &placed[at].1.rows;
+            out.push(ModelGroup { model: m, buf: buf.cast_const(), count: n as u32, at: V3 { x: r[0][3], y: r[1][3], z: r[2][3] } });
+            at = end;
+        }
+        out
+    }
+
+    /// Draws the models this frame placed (`prepare_models`).
+    ///
+    /// # Safety
+    /// Inside a scene on `ctx`, after `draw` this frame.
+    pub unsafe fn draw_models(&mut self, ctx: *mut g::SceGxmContext, vp: &Mat4, frame: &Frame, look: &[f32; 12], haze: &Haze, night: bool, shadow: &g::SceGxmTexture, sun: &SunMap, groups: &[ModelGroup]) -> u32 {
+        let mut tris = 0;
+        for group in groups {
+            let n = group.count;
+            let model = self.models[group.model];
             for bi in model.first..model.first + model.count {
                 let b = self.batches[bi as usize];
                 let boxed = b.kind == kind::BOXED_INST;
@@ -689,7 +727,7 @@ impl CityGpu {
                     (false, _, true) => &self.inst_night,
                     (false, _, false) => &self.inst,
                 };
-                pass.bind(ctx, shadow, &self.lamp, &self.around);
+                pass.bind(ctx, shadow, &self.lamp, &self.around, sun.texture());
                 // A car's pictures, and what it emits by night over its glow picture's scale.
                 let mut glow = 0.0;
                 if boxed {
@@ -706,6 +744,7 @@ impl CityGpu {
                 let v = Uniforms::vertex(ctx);
                 v.set(pass.vp, vp);
                 v.set(pass.lamp_map, &self.lamp_map);
+                v.set(pass.sun_vp, &sun.read);
                 v.set(pass.bx, &[b.origin[0], b.origin[1], b.origin[2], 0.0, b.span[0], b.span[1], b.span[2], 0.0]);
                 if boxed {
                     let (lo, size) = (model.box_min, model.box_size);
@@ -713,21 +752,108 @@ impl CityGpu {
                 }
                 let mut l = *look;
                 l[7] = glow;
-                let r = &placed[at].1.rows;
-                l[9..12].copy_from_slice(&haze.towards(V3 { x: r[0][3], y: r[1][3], z: r[2][3] }));
+                l[9..12].copy_from_slice(&haze.towards(group.at));
                 Uniforms::fragment(ctx).set(pass.look, &l);
                 let mut fr = *frame;
-                fr[3] = haze.density_to(r[1][3]);
+                fr[3] = haze.density_to(group.at.y);
                 v.set(pass.frame, &fr);
                 g::sceGxmSetVertexStream(ctx, 0, self.own.solids.add(b.vtx_first as usize * 20).cast());
-                g::sceGxmSetVertexStream(ctx, 1, buf.cast());
-                g::sceGxmDrawInstanced(ctx, g::SceGxmPrimitiveType_SCE_GXM_PRIMITIVE_TRIANGLES, g::SceGxmIndexFormat_SCE_GXM_INDEX_FORMAT_U16, self.own.indices.add(b.idx_first as usize).cast(), b.idx_count * n as u32, b.idx_count);
-                tris += b.idx_count / 3 * n as u32;
+                g::sceGxmSetVertexStream(ctx, 1, group.buf.cast());
+                g::sceGxmDrawInstanced(ctx, g::SceGxmPrimitiveType_SCE_GXM_PRIMITIVE_TRIANGLES, g::SceGxmIndexFormat_SCE_GXM_INDEX_FORMAT_U16, self.own.indices.add(b.idx_first as usize).cast(), b.idx_count * n, b.idx_count);
+                tris += b.idx_count / 3 * n;
             }
-            at = end;
         }
         tris
     }
+
+    /// Draws into the sun's depth map (inside its scene) what casts shadows near the eye: the near and detail
+    /// levels of the cells the map sees whose records are in, but their ground, and the models this frame placed.
+    ///
+    /// # Safety
+    /// Inside the sun map's scene on `ctx`.
+    pub unsafe fn draw_sun(&mut self, ctx: *mut g::SceGxmContext, sun: &SunMap, eye: V3, groups: &[ModelGroup]) -> u32 {
+        let planes = mat::planes(&sun.draw);
+        let c = &self.city;
+        let reach = crate::sunmap::HALF + 140.0;
+        let cell_of = |x: f32, z: f32| (((x - c.x0) / c.cell).floor() as i32, ((z - c.z0) / c.cell).floor() as i32);
+        let (lo, hi) = (cell_of(eye.x - reach, eye.z - reach), cell_of(eye.x + reach, eye.z + reach));
+        let mut tris = 0;
+        let mut bound: Option<(u32, u32)> = None;
+        for cz in lo.1.max(0)..=hi.1.min(c.cells_z as i32 - 1) {
+            for cx in lo.0.max(0)..=hi.0.min(c.cells_x as i32 - 1) {
+                let index = cz as u32 * c.cells_x + cx as u32;
+                let cell = self.cells[index as usize];
+                if cell.near.count + cell.detail.count == 0 || !ny_view::visible(&planes, cell.min, cell.max) {
+                    continue;
+                }
+                let Some(base) = self.near.ready(index) else { continue };
+                let s = self.near_cells[index as usize].starts();
+                let (solids, walls, indices, instances) = (base.add(s[0]), base.add(s[1]), base.add(s[3]).cast::<u16>(), base.add(s[4]));
+                for range in [cell.near, cell.detail] {
+                    for bi in range.first..range.first + range.count {
+                        let b = self.batches[bi as usize];
+                        if b.kind == kind::GROUND {
+                            continue;
+                        }
+                        let (pass, which) = match b.kind {
+                            kind::LEAF_INST => (&self.sun_leaf, 2),
+                            k if kind::instanced(k) => (&self.sun_inst, 1),
+                            _ => (&self.sun_solid, 0),
+                        };
+                        if bound.map(|x| x.0) != Some(which) || (which == 2 && bound.map(|x| x.1) != Some(b.tex)) {
+                            pass.prog.bind(ctx, false);
+                            gpu::state_opaque(ctx, Cull::None);
+                            if which == 2 {
+                                if let Some(Some(t)) = self.textures.get(b.tex as usize) {
+                                    g::sceGxmSetFragmentTexture(ctx, pass.units[0], &t.gxm);
+                                }
+                            }
+                            bound = Some((which, b.tex));
+                        }
+                        let v = Uniforms::vertex(ctx);
+                        v.set(pass.sun_vp, &sun.draw);
+                        v.set(pass.bx, &[b.origin[0], b.origin[1], b.origin[2], 0.0, b.span[0], b.span[1], b.span[2], 0.0]);
+                        if which == 0 {
+                            let vb = if matches!(b.kind, kind::WALL | kind::PICTURE) { walls } else { solids };
+                            gpu::draw(ctx, vb.add(b.vtx_first as usize * 20), indices.add(b.idx_first as usize), b.idx_count);
+                            tris += b.idx_count / 3;
+                        } else {
+                            let shapes = if matches!(b.kind, kind::LEAF_INST | kind::PICTURE_INST) { self.own.walls } else { self.own.solids };
+                            g::sceGxmSetVertexStream(ctx, 0, shapes.add(b.vtx_first as usize * 20).cast());
+                            g::sceGxmSetVertexStream(ctx, 1, instances.add(b.inst_first as usize * 52).cast());
+                            g::sceGxmDrawInstanced(ctx, g::SceGxmPrimitiveType_SCE_GXM_PRIMITIVE_TRIANGLES, g::SceGxmIndexFormat_SCE_GXM_INDEX_FORMAT_U16, self.own.indices.add(b.idx_first as usize).cast(), b.idx_count * b.inst_count, b.idx_count);
+                            tris += b.idx_count / 3 * b.inst_count;
+                        }
+                    }
+                }
+            }
+        }
+        // What moves.
+        self.sun_inst.prog.bind(ctx, false);
+        gpu::state_opaque(ctx, Cull::None);
+        for group in groups {
+            let model = self.models[group.model];
+            for bi in model.first..model.first + model.count {
+                let b = self.batches[bi as usize];
+                let v = Uniforms::vertex(ctx);
+                v.set(self.sun_inst.sun_vp, &sun.draw);
+                v.set(self.sun_inst.bx, &[b.origin[0], b.origin[1], b.origin[2], 0.0, b.span[0], b.span[1], b.span[2], 0.0]);
+                g::sceGxmSetVertexStream(ctx, 0, self.own.solids.add(b.vtx_first as usize * 20).cast());
+                g::sceGxmSetVertexStream(ctx, 1, group.buf.cast());
+                g::sceGxmDrawInstanced(ctx, g::SceGxmPrimitiveType_SCE_GXM_PRIMITIVE_TRIANGLES, g::SceGxmIndexFormat_SCE_GXM_INDEX_FORMAT_U16, self.own.indices.add(b.idx_first as usize).cast(), b.idx_count * group.count, b.idx_count);
+                tris += b.idx_count / 3 * group.count;
+            }
+        }
+        tris
+    }
+}
+
+/// One model's instances this frame: their buffer in the ring, how many, and where the first stands.
+pub struct ModelGroup {
+    pub model: usize,
+    pub buf: *const u8,
+    pub count: u32,
+    pub at: V3,
 }
 
 /// An instance at `(x, y, z)` turned by yaw (about y), then pitch (about x), then roll (about z), as three.js's

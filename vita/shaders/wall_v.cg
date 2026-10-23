@@ -9,11 +9,13 @@ void main(
     uniform float4x4 uMvp,
     uniform float4 uBox[2],
     uniform float4 uFrame[6],
+    uniform float4x4 uSunVp,
     // From world x and z to the lamp light's texture coordinates: x scale, x offset, z scale, z offset
     uniform float4 uLampMap,
     // xy: roughness and metalness of the page's surface
     uniform float4 uGloss,
     out float4 oPosition : POSITION,
+    out float4 oSun : TEXCOORD6,
     out float2 oUv : TEXCOORD0,
     out float2 oMap : TEXCOORD1,
     out float oHeight : TEXCOORD2,
@@ -27,6 +29,7 @@ void main(
     float3 world = aPosition * uBox[1].xyz + uBox[0].xyz;
     oMap = shadow_map(world, aNormal, uFrame);
     oHeight = world.y;
+    oSun = sun_at(world, uSunVp);
     // (a wall takes the light on the ground before it, fading up its first storeys)
     oLamp = (world.xz + aNormal.xz * 2.0) * uLampMap.xz + uLampMap.yw;
     oLight = float4(hemi(aNormal, uFrame) * aAo, max(dot(aNormal, uFrame[0].xyz), 0.0));

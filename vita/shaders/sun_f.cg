@@ -1,0 +1,18 @@
+// The sun's depth map keeps only depth; a tree's card is cut where its leaves' picture is under half.
+#ifdef LEAF
+uniform sampler2D uLeaves;
+#endif
+
+half4 main(
+#ifdef LEAF
+    float3 vUv : TEXCOORD0
+#endif
+    ) : COLOR
+{
+#ifdef LEAF
+    half a = lerp((half)1.0, (half)tex2D(uLeaves, vUv.xy).a, (half)vUv.z);
+    if (a < 0.5)
+        discard;
+#endif
+    return half4(0.0, 0.0, 0.0, 1.0);
+}

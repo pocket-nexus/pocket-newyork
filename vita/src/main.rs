@@ -19,6 +19,7 @@ mod mat;
 mod near;
 mod paths;
 mod shadow;
+mod sunmap;
 mod sky;
 
 use std::io::{Read, Write};
@@ -257,6 +258,8 @@ struct Settings {
     /// Draw what moves, and the glow over the frame (off for measurements).
     models: bool,
     post: bool,
+    /// Draw the sun's depth map (off for a measurement of what it costs).
+    sun: bool,
     /// A fixed eye (position, target, fov), for captures and measurements; `None` follows the game.
     view: Option<(V3, V3, f32)>,
     /// Triangles a frame may draw: the reaches of the levels of detail follow it (and the GPU).
@@ -265,6 +268,9 @@ struct Settings {
     /// The reaches when the budget allows them in full.
     full: Reach,
 }
+
+/// Metres within which a car is the reference's full model.
+const NEAR_CAR: f32 = 40.0;
 
 /// Seconds a frame may wait for the GPU to finish the frame before last, per refresh it is paced to, before the
 /// governor draws the levels of detail in.
@@ -306,6 +312,7 @@ fn apply_control(v: &Value, s: &mut Settings, game: &mut Game, session: &mut Ses
     s.interface = flag("interface", s.interface);
     s.models = flag("models", s.models);
     s.post = flag("post", s.post);
+    s.sun = flag("sun", s.sun);
     s.show.walls = flag("walls", s.show.walls);
     s.show.solids = flag("solids", s.show.solids);
     s.show.instances = flag("instances", s.show.instances);
@@ -508,14 +515,15 @@ fn main() {
             let sky = sky::Sky::new(&mut gpu, &mut vram, msaa, &p.read(ny_pack::SKYP)?)?;
             let mut targets = Arena::new(Kind::Main, 4 * 1024 * 1024);
             let glow = glow::Glow::new(&mut gpu, &mut vram, &mut targets, msaa)?;
+            let sunmap = sunmap::SunMap::new(&mut vram, &mut targets)?;
             gpu.finish();
             shell.frame(Mode::Loading, "Casting the first shadows");
             let start = &world.entities[1];
             let sun = presets[0].sun_dir;
             let shadows = shadow::Shadows::new(&mut vram, pack_path, heights, (p.range(ny_pack::HMAP)?.0 + 32) as u64, v3(sun[0], sun[1], sun[2]), v3(start.pos[0], start.pos[1], start.pos[2]))?;
-            Ok((meta, presets, world, gpu, city, vram, sky, shadows, glow, targets))
+            Ok((meta, presets, world, gpu, city, vram, sky, shadows, glow, targets, sunmap))
         })();
-        let (meta, presets, world, gpu, mut city, vram, sky, mut shadows, mut glow, _targets) = match loaded {
+        let (meta, presets, world, gpu, mut city, vram, sky, mut shadows, mut glow, _targets, mut sunmap) = match loaded {
             Ok(x) => x,
             Err(e) => shell.fail(e),
         };
@@ -524,7 +532,8 @@ fn main() {
 
         // The models of the traffic's kinds (ny_sim::traffic::Kind's order) and of the player's vehicles (Mode's).
         let kinds = ["taxi", "sedan", "suv", "nypd", "bus"].map(|n| city.model(n));
-        // Within 90 m the reference draws its full cars (CAR_PROXY_DISTANCE); past it, the stand-ins above.
+        // Near the eye the reference's full cars (it draws them within 90 m, CAR_PROXY_DISTANCE; 4 100 triangles each,
+        // so here within 40 m), past that the stand-ins above (500), both under the same pictures.
         let kinds_near = ["taxi-near", "sedan-near", "suv-near", "nypd-near", "bus"].map(|n| city.model(n));
         let player_models = [None, city.model("player-car"), city.model("player-cyclist"), city.model("player-helicopter")];
         // The people, posed by the export at eight points of their cycles.
@@ -534,6 +543,7 @@ fn main() {
         let rider: Vec<Option<usize>> = (0..8).map(|k| city.model(&format!("rider-{k}"))).collect();
         let mut gait = 0.0f32;
         let mut placed: Vec<(usize, ny_pack::Instance)> = Vec::with_capacity(city::MODEL_INSTANCES);
+        let mut sun_tris = 0u32;
         let mut game = Game::with_world(world);
         let mut session = Session::new();
         session.traffic = true;
@@ -556,6 +566,7 @@ fn main() {
             interface: true,
             models: true,
             post: true,
+            sun: true,
             view: None,
             budget: 380_000,
             govern: true,
@@ -655,36 +666,19 @@ fn main() {
             // This slot's vertices were last used two frames ago: the GPU must be done with them.
             fence.wait(slot);
             let waited = t2.elapsed();
-            // What is bright in the frame on display glows over this one, as the reference's bloom does for the hour:
-            // its strength, and its threshold where the display shows it (a little under: the chain sees the display's
-            // compressed highlights).
-            let glow_gain = preset.bloom[0] * 3.0;
-            let glow_threshold = (preset.bloom[1] - 0.12).clamp(0.55, 0.9);
-            if let Err(e) = if set.post { glow.run(ctx, glow_gain, glow_threshold, g::vita2d_get_current_fb(), 960) } else { Ok(()) } {
-                pocketjs_vita::vita_log(format_args!("newyork: {e}"));
-            }
-            g::vita2d_pool_reset();
-            if slot == 1 {
-                g::vita2d_pool_malloc(POOL_BYTES / 2);
-            }
-            g::vita2d_start_drawing_advanced(core::ptr::null_mut(), 0);
-            // The sky covers the whole frame: nothing is cleared.
-            g::sceGxmSetViewport(ctx, 480.0, 480.0, 272.0, -272.0, 0.0, 1.0);
-            sky.draw(ctx, &sky_mvp, game.hour.index());
-            stats = city.draw(ctx, &vp, eye, &frame, &look, &haze, night, shadows.texture(), &set.show, frame_no);
             // What moves: the traffic, and the player's vehicle.
             placed.clear();
             if game.traffic_on && set.models {
-                // Cars in view and within the middle distance (past it a car is a few pixels under the haze).
+                // Cars in view and within the middle distance, at most 450 m (past it a car is a few pixels).
                 let planes = mat::planes(&vp);
-                let reach = set.show.reach.mid.clamp(300.0, 700.0);
+                let reach = set.show.reach.mid.clamp(250.0, 450.0);
                 for v in game.vehicles().iter().filter(|v| v.placed()) {
                     let Some(far) = kinds[v.kind as usize] else { continue };
                     let (dx, dz) = (v.x - eye.x, v.z - eye.z);
                     if dx * dx + dz * dz > reach * reach || !ny_view::visible(&planes, [v.x - 7.0, -1.0, v.z - 7.0], [v.x + 7.0, 5.0, v.z + 7.0]) {
                         continue;
                     }
-                    let m = if dx * dx + dz * dz < 90.0 * 90.0 { kinds_near[v.kind as usize].unwrap_or(far) } else { far };
+                    let m = if dx * dx + dz * dz < NEAR_CAR * NEAR_CAR { kinds_near[v.kind as usize].unwrap_or(far) } else { far };
                     // Paint is linear; it multiplies colours that are sRGB.
                     let tint = display(v.paint);
                     placed.push((m, city::placed(v.x, 0.0, v.z, v.yaw, v.pitch, v.roll, tint)));
@@ -729,8 +723,37 @@ fn main() {
                     }
                 }
             }
+            let groups = city.prepare_models(&mut placed);
+            // The sun's depth map around the eye, before the frame (not under the moon: its light casts little).
+            if set.sun && preset.night < 0.5 {
+                sunmap.place(eye, v3(sun[0], sun[1], sun[2]));
+                if sunmap.begin(ctx).is_ok() {
+                    sun_tris = city.draw_sun(ctx, &sunmap, eye, &groups);
+                    sunmap.end(ctx);
+                }
+            } else {
+                sunmap.off();
+                sun_tris = 0;
+            }
+            // What is bright in the frame on display glows over this one, as the reference's bloom does for the hour:
+            // its strength, and its threshold where the display shows it (a little under: the chain sees the display's
+            // compressed highlights).
+            let glow_gain = preset.bloom[0] * 3.0;
+            let glow_threshold = (preset.bloom[1] - 0.12).clamp(0.55, 0.9);
+            if let Err(e) = if set.post { glow.run(ctx, glow_gain, glow_threshold, g::vita2d_get_current_fb(), 960) } else { Ok(()) } {
+                pocketjs_vita::vita_log(format_args!("newyork: {e}"));
+            }
+            g::vita2d_pool_reset();
+            if slot == 1 {
+                g::vita2d_pool_malloc(POOL_BYTES / 2);
+            }
+            g::vita2d_start_drawing_advanced(core::ptr::null_mut(), 0);
+            // The sky covers the whole frame: nothing is cleared.
+            g::sceGxmSetViewport(ctx, 480.0, 480.0, 272.0, -272.0, 0.0, 1.0);
+            sky.draw(ctx, &sky_mvp, game.hour.index());
+            stats = city.draw(ctx, &vp, eye, &frame, &look, &haze, night, shadows.texture(), &sunmap, &set.show, frame_no);
             if set.models {
-                stats.tris[2] += city.draw_models(ctx, &vp, &frame, &look, &haze, night, shadows.texture(), &mut placed);
+                stats.tris[2] += city.draw_models(ctx, &vp, &frame, &look, &haze, night, shadows.texture(), &sunmap, &groups);
             }
             if set.post {
                 glow.add(ctx, glow_gain);
@@ -808,7 +831,7 @@ fn main() {
                     "frameMs": timing.avg(), "worstMs": timing.worst(), "late": timing.late, "lateBy": {"cpu": late_cpu, "gpu": late_gpu}, "frames": timing.frames, "pace": set.pace,
                     "cpuMs": {"draw": draw_ms, "sim": sim_ms, "interface": ui_ms, "interfaceDraw": ui_draw_ms},
                     "gpuMs": if set.profile { json!(gpu_ms) } else { Value::Null },
-                    "city": {"draws": stats.draws, "tris": {"wall": stats.tris[0], "solid": stats.tris[1], "instanced": stats.tris[2]}, "places": stats.places},
+                    "city": {"draws": stats.draws, "tris": {"wall": stats.tris[0], "solid": stats.tris[1], "instanced": stats.tris[2], "sun": sun_tris}, "places": stats.places},
                     "near": {"slots": [filled, slots], "reads": city.near.reads, "mb": city.near.bytes as f32 / 1e6, "starved": city.near.starved},
                     "camera": {"pos": [eye.x, eye.y, eye.z], "target": [target.x, target.y, target.z], "fov": fov},
                     "game": {"player": r.mode.name(), "hour": game.hour.index(), "camera": game.camera, "mph": r.mph, "at": r.at, "label": game.label()},
