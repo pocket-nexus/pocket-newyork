@@ -7,5 +7,6 @@
   "error": [0.01, 0.04, 0.1, 0.05],
   "mid_radius": 6.0,
   "far_radius": 40.0,
-  "detail_radius": 2.5
+  "detail_radius": 2.5,
+  "skyline": { "cell": 4.0, "cap": 10.0, "min_area": 400.0, "eps": 6.0, "min_height": 8.0, "smooth": 1 }
 }

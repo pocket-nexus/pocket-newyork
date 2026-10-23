@@ -1,7 +1,10 @@
 // Pictures of the reference as it runs in Chrome over WebGPU, and what its scene holds.
 //
 //   bun tools/newyork.ts look [--time golden|day|...] [--camera ID] [--teleport KEY] [--mode car|...] [--size 1280x720]
-//                             [--inventory] [--out DIR] [--headed]
+//                             [--eye x,y,z --at x,y,z [--fov 56]] [--inventory] [--out DIR] [--headed]
+//
+// `--eye` and `--at` hold the reference's camera there (its camera system's update is replaced), for pictures to
+// put beside a pack's from the same place.
 //
 // Writes `<out>/<name>.png` and, with --inventory, `<out>/inventory.json`: every drawn object of the scene by kind,
 // with its triangles, instances and material.
@@ -43,8 +46,25 @@ export async function look(argv: string[]) {
     if (arg("teleport")) steps.push(`[data-teleport="${arg("teleport")}"]`);
     if (arg("camera")) steps.push(`[data-camera="${arg("camera")}"]`);
     for (const sel of steps) await page.evaluate((s) => (document.querySelector(s) as HTMLElement | null)?.click(), sel);
+    if (arg("eye") && arg("at")) {
+      const [eye, at] = [arg("eye")!, arg("at")!].map((v) => v.split(",").map(Number));
+      await page.evaluate(
+        ({ eye, at, fov }) => {
+          const cams = (window as any).__NYC_APP.cameraSystem;
+          cams.update = function () {
+            this.camera.position.set(eye[0], eye[1], eye[2]);
+            this.camera.lookAt(at[0], at[1], at[2]);
+            if (this.camera.fov !== fov) {
+              this.camera.fov = fov;
+              this.camera.updateProjectionMatrix();
+            }
+          };
+        },
+        { eye, at, fov: Number(arg("fov") ?? 56) },
+      );
+    }
     await page.waitForTimeout(Number(arg("wait") ?? 6000));
-    const name = arg("name") ?? ([arg("mode"), arg("teleport"), arg("camera"), arg("time")].filter(Boolean).join("-") || "start");
+    const name = arg("name") ?? ([arg("mode"), arg("teleport"), arg("camera"), arg("time"), arg("eye") && "eye"].filter(Boolean).join("-") || "start");
     await page.screenshot({ path: join(out, `${name}.png`) });
     console.log(`  ${join(out, `${name}.png`)}`);
     if (argv.includes("--inventory")) {

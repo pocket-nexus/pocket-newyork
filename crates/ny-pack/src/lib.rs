@@ -44,7 +44,7 @@ use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
 pub const MAGIC: u32 = u32::from_le_bytes(*b"NYPK");
-pub const VERSION: u32 = 9;
+pub const VERSION: u32 = 10;
 
 pub const fn tag(t: &[u8; 4]) -> u32 {
     u32::from_le_bytes(*t)
@@ -128,10 +128,15 @@ pub mod kind {
     /// leaves' picture (`tex`), `tint` the bark's colour with alpha 255 on a leaf card. Seen from both sides; a
     /// card is cut where the picture's alpha is under a half.
     pub const LEAF_INST: u32 = 6;
-    pub const COUNT: usize = 7;
+    /// Surfaces under a picture of their own (a sign, a billboard): `WallVertex` with `uv` over the picture (`tex`,
+    /// whose `metres` is the scale its texels stand over), `tint` alpha 255 where the reference does not light it.
+    pub const PICTURE: u32 = 7;
+    /// As `PICTURE`, one shape at every `Instance` (a shop's sign along every block).
+    pub const PICTURE_INST: u32 = 8;
+    pub const COUNT: usize = 9;
 
     pub fn instanced(kind: u32) -> bool {
-        kind == SOLID_INST || kind == OPEN_INST || kind == LEAF_INST
+        kind == SOLID_INST || kind == OPEN_INST || kind == LEAF_INST || kind == PICTURE_INST
     }
 }
 

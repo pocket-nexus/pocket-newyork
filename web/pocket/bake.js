@@ -11,7 +11,7 @@
 
 import * as THREE from 'three/webgpu';
 import { float } from 'three/tsl';
-import { log, put } from './util.js';
+import { log, materialOrder, put } from './util.js';
 
 const SS = 2; // samples per texel along each axis
 
@@ -281,9 +281,62 @@ export async function bakeLeaves(app) {
   return { file: 'bake/leaves.png', flipV: true };
 }
 
+/**
+ * Pictures: a material that shows a picture over its texture coordinates (a sign, a billboard, a street-name blade,
+ * a bus's destination) drawn through its own colour graph over its texture coordinates, 0 to 1 each way, as one
+ * picture. Its look past the picture (an LED panel's scan lines, the border) comes with it; what moves in it (a
+ * billboard's sweep) stands still.
+ */
+export async function bakePictures(app) {
+  const { renderer, scene: city, lighting } = app;
+  lighting.applyPreset('midday', true);
+  const records = [];
+  const order = materialOrder(city);
+  for (let id = 0; id < order.length; id++) {
+    const m = order[id];
+    const billboard = m.userData.pocket?.factory === 'createBillboardMaterial';
+    if (!m.map && !billboard) continue;
+    const img = m.map?.image;
+    const aspect = img && img.width && img.height ? img.width / img.height : billboard ? 2 : 1;
+    const w = aspect >= 1 ? 512 : Math.max(64, 2 ** Math.round(Math.log2(512 * aspect)));
+    const h = aspect >= 1 ? Math.max(64, 2 ** Math.round(Math.log2(512 / aspect))) : 512;
+    const quad = new THREE.PlaneGeometry(1, 1);
+    quad.translate(0.5, 0.5, 0);
+    const bm = new THREE.MeshBasicNodeMaterial();
+    bm.fog = false;
+    if (m.color) bm.color.copy(m.color);
+    bm.map = m.map ?? null;
+    bm.colorNode = m.colorNode ?? null;
+    const scene = new THREE.Scene();
+    scene.add(new THREE.Mesh(quad, bm));
+    const cam = new THREE.OrthographicCamera(0, 1, 1, 0, 0.1, 10);
+    cam.position.set(0, 0, 5);
+    cam.updateMatrixWorld();
+    const target = new THREE.RenderTarget(w * SS, h * SS, { type: THREE.FloatType, depthBuffer: false });
+    renderer.setRenderTarget(target);
+    renderer.setClearColor(0x000000, 1);
+    renderer.clear();
+    renderer.render(scene, cam);
+    renderer.setRenderTarget(null);
+    const px = await renderer.readRenderTargetPixelsAsync(target, 0, 0, w * SS, h * SS);
+    target.dispose();
+    // Brighter than white (a lit poster) is kept over its scale.
+    const scale = Math.max(1, Math.min(4, peak(px)));
+    const name = `picture_${id}`;
+    await put(`bake/${name}.png`, await png(downsample(px, w, h, scale), w, h));
+    records.push({ material: id, type: m.type, factory: m.userData.pocket?.factory ?? null, file: `bake/${name}.png`, scale, unlit: m.type === 'MeshBasicNodeMaterial' });
+    bm.dispose();
+    quad.dispose();
+  }
+  lighting.applyPreset('golden', true);
+  log(`bake: ${records.length} pictures`);
+  return records;
+}
+
 export async function bake(app) {
   const facades = await bakeFacades(app);
   const ground = await bakeGround(app);
   const leaves = await bakeLeaves(app);
-  await put('bake.json', JSON.stringify({ facades, ground, leaves }, null, 1));
+  const pictures = await bakePictures(app);
+  await put('bake.json', JSON.stringify({ facades, ground, leaves, pictures }, null, 1));
 }

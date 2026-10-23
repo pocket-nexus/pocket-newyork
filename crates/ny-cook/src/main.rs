@@ -10,6 +10,7 @@ mod heights;
 mod ir;
 mod tex;
 mod sim;
+mod skyline;
 
 use bins::{Bin, Bins, Vx, DETAIL, FAR, MID, NEAR};
 use geom::{Aabb, M4};
@@ -36,6 +37,9 @@ struct Profile {
     far_radius: f32,
     /// An instance of something repeated smaller than this (a lamp, a sign, a hydrant) is a cell's detail.
     detail_radius: f32,
+    /// The far level of the facade boxes as one grid of heights (`skyline`); without it, each tall box's walls.
+    #[serde(default)]
+    skyline: Option<skyline::Profile>,
 }
 
 /// How the compiler treats an object.
@@ -49,9 +53,11 @@ enum Class {
     Facade,
     /// Trees: their crowns of cards, as the reference draws them past 420 m (`lod2`), under the baked leaves.
     Tree,
+    /// Under a picture its material draws (`bake.json` `pictures`).
+    Picture,
 }
 
-fn classify(ir: &Ir, o: &Object, facades: &facade::Facades) -> Class {
+fn classify(ir: &Ir, o: &Object, facades: &facade::Facades, pictures: &HashMap<usize, (u32, bool)>) -> Class {
     const MOVING: [&str; 8] = ["PlayerTaxiCar", "PlayerPerson", "PlayerCyclist", "PlayerHelicopter", "PeopleNear", "PeopleFar", "ManhattanTrafficAndPedestrians", "HighwayTraffic"];
     if MOVING.iter().any(|m| o.path.split('/').any(|p| p == *m)) {
         return Class::Skip;
@@ -73,6 +79,9 @@ fn classify(ir: &Ir, o: &Object, facades: &facade::Facades) -> Class {
     }
     if m.transparent && m.factory.as_deref() != Some("createRoadPaintMaterial") {
         return Class::Skip;
+    }
+    if pictures.contains_key(&o.material(0)) && ir.geometries[o.geometry].attributes.contains_key("uv") {
+        return Class::Picture;
     }
     let boxed = o.instances.as_ref().is_some_and(|i| i.attrs.contains_key("box") && i.attrs.contains_key("faces"));
     if boxed && ir.material_key(o.material(0)).is_some_and(|k| facades.styles.contains_key(&k)) {
@@ -185,8 +194,9 @@ fn main() {
     eprintln!("facades: {} styles, {} pictures", facades.styles.len(), textures.entries.len());
     let grounds = ground_swatches(&ir_dir, &mut textures);
     let leaves = leaves_picture(&ir_dir, &mut textures);
-    eprintln!("ground: {} pictures", grounds.len());
-    let classes: Vec<Class> = ir.objects.iter().map(|o| classify(&ir, o, &facades)).collect();
+    let pictures = pictures(&ir_dir, &mut textures);
+    eprintln!("ground: {} pictures; signs and billboards: {}", grounds.len(), pictures.len());
+    let classes: Vec<Class> = ir.objects.iter().map(|o| classify(&ir, o, &facades, &pictures)).collect();
     let mut sources: HashMap<usize, Source> = HashMap::new();
     let mut mats: HashMap<usize, Vec<f32>> = HashMap::new();
 
@@ -270,7 +280,9 @@ fn main() {
     let mut means: HashMap<(usize, usize, usize), [f32; 3]> = HashMap::new();
     let mut inst_colors: HashMap<usize, Vec<f32>> = HashMap::new();
     let mut tree_shapes: HashMap<usize, u32> = HashMap::new();
+    let mut picture_shapes: HashMap<usize, u32> = HashMap::new();
     let mut lamps: Vec<([f32; 3], [f32; 3])> = Vec::new();
+    let mut sky_boxes: Vec<skyline::Box> = Vec::new();
     // Triangles by level and by what they come from, for the receipt.
     let mut spend: HashMap<(usize, String), usize> = HashMap::new();
     for (oid, i, m, b) in &placed {
@@ -311,6 +323,11 @@ fn main() {
                 }
             }
         }
+        if class == Class::Picture {
+            let (tex, unlit) = pictures[&o.material(0)];
+            picture_instance(&ir, o, *i, m, b, src, tex, unlit, &mut bins, &mut picture_shapes, &profile);
+            continue;
+        }
         if class == Class::Tree {
             if let Some(tex) = leaves {
                 tree_instance(&ir, o, *i, m, b, src, probe, tex, &mut bins, &mut tree_shapes, &mut attrs_cache);
@@ -318,10 +335,28 @@ fn main() {
             continue;
         }
         if class == Class::Facade {
-            facade_instance(&ir, o, *i, m, b, &facades, &textures, probe, &mut bins, &profile, &mut attrs_cache, &mut spend, &heights);
+            let sky = facade_instance(&ir, o, *i, m, b, &facades, &textures, probe, &mut bins, &profile, &mut attrs_cache, &mut spend, &heights);
+            if let Some(mut sky) = sky {
+                // The roof's colour: the mean of its probed vertices.
+                let mut sum = [0u32; 3];
+                let mut n = 0;
+                for (_, tris) in &src.lods[0] {
+                    let (verts, _) = vertices(src, tris, probe, *i, Some((m, &nm, mirror)), false, true);
+                    for v in &verts {
+                        for k in 0..3 {
+                            sum[k] += v.a[k] as u32;
+                        }
+                    }
+                    n += verts.len() as u32;
+                }
+                if n > 0 {
+                    sky.roof = sum.map(|x| (x / n) as u8);
+                }
+                sky_boxes.push(sky);
+            }
         }
-        // A facade box's far level is its height's to decide (see `facade_instance`).
-        let tall = class == Class::Facade && b.size()[1] >= 20.0;
+        // A facade box's far level is its height's to decide (see `facade_instance`), or the skyline's.
+        let tall = class == Class::Facade && b.size()[1] >= 20.0 && profile.skyline.is_none();
         // Small repeated things are a cell's detail, and only that.
         let small = o.instances.is_some() && class == Class::Solid && radius < profile.detail_radius;
         // What a building carries (cornices, fire escapes, rooftop plant) is seen near it alone.
@@ -433,13 +468,18 @@ fn main() {
             }
         }
     }
+    if let Some(sp) = profile.skyline {
+        let [tops, walls] = skyline::build(&sky_boxes, sp, &mut bins);
+        eprintln!("skyline: {} boxes, {tops} triangles of tops, {walls} of walls", sky_boxes.len());
+        *spend.entry((2, "skyline".into())).or_default() += tops + walls;
+    }
     let model_parts = models::shapes(&ir_dir, &mut bins).unwrap_or_else(|e| panic!("{e}"));
     let tris = bins.triangles();
     eprintln!("triangles: near {} mid {} far {} detail {}", tris[0], tris[1], tris[2], tris[3]);
     let mut spent: Vec<_> = spend.into_iter().collect();
     spent.sort_by(|a, b| b.1.cmp(&a.1));
     for want in [0usize, 1, 2, 3] {
-        for ((_, label), n) in spent.iter().filter(|e| e.0 .0 == want).take(if want == 1 { 24 } else { 6 }) {
+        for ((_, label), n) in spent.iter().filter(|e| e.0 .0 == want).take(if want == 1 || want == 2 { 24 } else { 6 }) {
             eprintln!("  {} {:>9} {label}", ["near", "mid", "far", "detail"][want], n);
         }
     }
@@ -500,9 +540,10 @@ fn main() {
 /// One facade box: its walls under the pages at the near and the mid level, and at the far level a box painted
 /// with the pages' mean colours (the roof comes from the probe, as for any solid).
 #[allow(clippy::too_many_arguments)]
-fn facade_instance(ir: &Ir, o: &Object, i: usize, m: &M4, b: &Aabb, facades: &facade::Facades, textures: &tex::Textures, probe: Option<&ir::Probe>, bins: &mut Bins, profile: &Profile, cache: &mut HashMap<(usize, String), Vec<f32>>, spend: &mut HashMap<(usize, String), usize>, heights: &heights::Grid) {
+/// With a skyline in the profile, the box as the skyline takes it (its roof's colour is the caller's).
+fn facade_instance(ir: &Ir, o: &Object, i: usize, m: &M4, b: &Aabb, facades: &facade::Facades, textures: &tex::Textures, probe: Option<&ir::Probe>, bins: &mut Bins, profile: &Profile, cache: &mut HashMap<(usize, String), Vec<f32>>, spend: &mut HashMap<(usize, String), usize>, heights: &heights::Grid) -> Option<skyline::Box> {
     let _ = probe;
-    let Some(style) = ir.material_key(o.material(0)).and_then(|k| facades.styles.get(&k)) else { return };
+    let style = ir.material_key(o.material(0)).and_then(|k| facades.styles.get(&k))?;
     let inst = o.instances.as_ref().unwrap();
     let mut attr = |name: &str| -> [f32; 4] {
         let a = &inst.attrs[name];
@@ -523,6 +564,39 @@ fn facade_instance(ir: &Ir, o: &Object, i: usize, m: &M4, b: &Aabb, facades: &fa
     // Mid: one quad a wall, under the page of its upper storeys.
     let mut simple = Vec::new();
     facade::box_walls_simple(style, m, bx, faces, &mut simple);
+    // Its walls' colour and glow, the colour of their pages.
+    let painted = |q: &facade::Quad| {
+        let mean = textures.mean(q.tex);
+        let night = textures.entries[q.tex as usize].night;
+        let glow = if night != pack::NO_TEX { textures.mean(night).map(|c| c * textures.entries[night as usize].metres) } else { [0.0; 3] };
+        ([geom::srgb(mean[0]), geom::srgb(mean[1]), geom::srgb(mean[2]), 0], glow_bytes(glow))
+    };
+    let sky = profile.skyline.map(|_| {
+        let n = simple.len().max(1) as f32;
+        let (mut wall, mut glow) = ([0.0f32; 3], [0.0f32; 3]);
+        for q in &simple {
+            let mean = textures.mean(q.tex);
+            let night = textures.entries[q.tex as usize].night;
+            for k in 0..3 {
+                wall[k] += mean[k] / n;
+                if night != pack::NO_TEX {
+                    glow[k] += textures.mean(night)[k] * textures.entries[night as usize].metres / n;
+                }
+            }
+        }
+        let c = |x: f32, z: f32| {
+            let p = geom::point(m, [x, -0.5, z]);
+            [p[0], p[2]]
+        };
+        skyline::Box {
+            corners: [c(-0.5, -0.5), c(0.5, -0.5), c(0.5, 0.5), c(-0.5, 0.5)],
+            bottom: geom::point(m, [0.0, -0.5, 0.0])[1],
+            top: geom::point(m, [0.0, 0.5, 0.0])[1],
+            wall: wall.map(geom::srgb),
+            roof: wall.map(geom::srgb),
+            glow: glow_bytes(glow),
+        }
+    });
     simple.retain_mut(|q| uncover(q, heights, true));
     if b.radius() >= profile.mid_radius {
         *spend.entry((1, "facade walls".into())).or_default() += simple.len() * 2;
@@ -531,20 +605,17 @@ fn facade_instance(ir: &Ir, o: &Object, i: usize, m: &M4, b: &Aabb, facades: &fa
             bins.bin(MID, mid, pack::kind::WALL, q.tex).add(&q.v, &[0, 1, 2, 0, 2, 3], sub);
         }
     }
-    // Far: tall boxes as painted walls, the colour of their pages.
-    if b.size()[1] >= 20.0 || b.radius() >= profile.far_radius {
+    // Far: tall boxes as painted walls, the colour of their pages (or the skyline's).
+    if sky.is_none() && (b.size()[1] >= 20.0 || b.radius() >= profile.far_radius) {
         *spend.entry((2, "facade walls".into())).or_default() += simple.len() * 2;
         let (far, sub) = bins.place(FAR, center);
         for q in &simple {
-            let mean = textures.mean(q.tex);
-            let night = textures.entries[q.tex as usize].night;
-            let glow = if night != pack::NO_TEX { textures.mean(night).map(|c| c * textures.entries[night as usize].metres) } else { [0.0; 3] };
-            let color = [geom::srgb(mean[0]), geom::srgb(mean[1]), geom::srgb(mean[2]), 0];
-            let g = glow_bytes(glow);
+            let (color, g) = painted(q);
             let v: Vec<Vx> = q.v.iter().map(|v| Vx { a: color, b: g, ..*v }).collect();
             bins.bin(FAR, far, pack::kind::SOLID, pack::NO_TEX).add(&v, &[0, 1, 2, 0, 2, 3], sub);
         }
     }
+    sky
 }
 
 /// The vertices a slot's triangles use, once each, coloured by the probe of `inst`; in the world through `world`
@@ -813,4 +884,56 @@ fn lamp_light(heights: &heights::Grid, lamps: &[([f32; 3], [f32; 3])]) -> Vec<u8
     }
     eprintln!("lamps: {} lights in a grid of {} × {} cells of {} m", lamps.len(), w, d, step);
     out
+}
+
+/// The pictures the export baked of signs and billboards (`bake.json` `pictures`), by material: the picture (its
+/// `metres` holds the scale its texels stand over) and whether the reference does not light it.
+fn pictures(ir: &std::path::Path, textures: &mut tex::Textures) -> HashMap<usize, (u32, bool)> {
+    let text = std::fs::read_to_string(ir.join("bake.json")).unwrap_or_default();
+    let bake: serde_json::Value = serde_json::from_str(&text).unwrap_or(serde_json::Value::Null);
+    let mut out = HashMap::new();
+    for p in bake["pictures"].as_array().into_iter().flatten() {
+        let (Some(m), Some(file)) = (p["material"].as_u64(), p["file"].as_str()) else { continue };
+        let t = textures.add_png(&ir.join(file), p["scale"].as_f64().unwrap_or(1.0) as f32).unwrap_or_else(|e| panic!("{e}"));
+        out.insert(m as usize, (t, p["unlit"].as_bool().unwrap_or(false)));
+    }
+    out
+}
+
+/// A sign or a billboard: its geometry under its picture, by its own texture coordinates; repeated ones as one shape
+/// with an instance each.
+#[allow(clippy::too_many_arguments)]
+fn picture_instance(ir: &Ir, o: &Object, i: usize, m: &M4, b: &Aabb, src: &Source, tex: u32, unlit: bool, bins: &mut Bins, shapes: &mut HashMap<usize, u32>, profile: &Profile) {
+    let g = &ir.geometries[o.geometry];
+    let uv = ir.attribute(g, "uv");
+    let tris = ir.triangles(g);
+    let tint = [128, 128, 128, if unlit { 255 } else { 0 }];
+    let vertex = |vi: usize, p: [f32; 3], n: [f32; 3]| {
+        let (u, v) = uv.as_ref().map(|(a, s)| (a[vi * s], a[vi * s + 1])).unwrap_or((0.0, 0.0));
+        Vx { p, n: geom::normalize(n).map(geom::snorm8), ao: 255, a: tint, b: [0; 4], uv: [u, 1.0 - v] }
+    };
+    let idx: Vec<u32> = tris.iter().flat_map(|(_, t)| t.iter().copied()).collect();
+    let radius = b.radius();
+    // Small repeated signs are a cell's detail; a billboard is near, and seen from the middle distance.
+    let levels: &[u8] = if o.instances.is_some() && radius < profile.detail_radius { &[DETAIL] } else if radius >= profile.mid_radius { &[NEAR, MID] } else { &[NEAR] };
+    if o.instances.as_ref().is_some_and(|x| x.count >= 4) {
+        let shape = *shapes.entry(o.id).or_insert_with(|| {
+            let verts: Vec<Vx> = (0..src.pos.len()).map(|vi| vertex(vi, src.pos[vi], src.nrm[vi])).collect();
+            bins.shape_of(pack::kind::WALL, tex, &verts, &idx)
+        });
+        let rows = [[m[0], m[4], m[8], m[12]], [m[1], m[5], m[9], m[13]], [m[2], m[6], m[10], m[14]]];
+        for &lod in levels {
+            let place = bins.place(lod, b.center());
+            bins.instance(lod, place, pack::kind::PICTURE_INST, shape, pack::Instance { rows, tint: [128, 128, 128, 255] }, b);
+        }
+        return;
+    }
+    let (nm, mirror) = geom::normal_matrix(m);
+    let verts: Vec<Vx> = (0..src.pos.len()).map(|vi| vertex(vi, geom::point(m, src.pos[vi]), geom::normal(&nm, src.nrm[vi]))).collect();
+    let idx: Vec<u32> = if mirror { idx.chunks(3).flat_map(|f| [f[0], f[2], f[1]]).collect() } else { idx };
+    let _ = i;
+    for &lod in levels {
+        let (place, sub) = bins.place(lod, b.center());
+        bins.bin(lod, place, pack::kind::PICTURE, tex).add(&verts, &idx, sub);
+    }
 }

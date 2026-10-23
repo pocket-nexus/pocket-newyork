@@ -1,7 +1,7 @@
 // Pictures of a compiled pack from the viewer page (web/pocket/view.html), beside the reference's own.
 //
 //   bun tools/newyork.ts view [--pack vita60/city.pack] [--eye x,y,z --at x,y,z] [--fov 56] [--hour golden]
-//                             [--near 250 --mid 1500] [--size 960x544] [--name NAME] [--out DIR]
+//                             [--near 250 --mid 1500 --detail 110 --far 7000] [--size 960x544] [--name NAME] [--out DIR]
 
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
@@ -18,7 +18,7 @@ export async function view(argv: string[]) {
   const [w, h] = (arg("size") ?? "960x544").split("x").map(Number);
   await serveDetached();
   const query = new URLSearchParams();
-  for (const k of ["pack", "eye", "at", "fov", "hour", "near", "mid"]) if (arg(k)) query.set(k, arg(k)!);
+  for (const k of ["pack", "eye", "at", "fov", "hour", "near", "mid", "detail", "far"]) if (arg(k)) query.set(k, arg(k)!);
   const browser = await chromium.launch({
     channel: "chrome",
     headless: !argv.includes("--headed"),

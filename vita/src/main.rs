@@ -254,6 +254,9 @@ struct Settings {
     pace: i32,
     /// Draw the interface (off for a measurement of what it costs).
     interface: bool,
+    /// Draw what moves, and the glow over the frame (off for measurements).
+    models: bool,
+    post: bool,
     /// A fixed eye (position, target, fov), for captures and measurements; `None` follows the game.
     view: Option<(V3, V3, f32)>,
     /// Triangles a frame may draw: the reaches of the levels of detail follow it (and the GPU).
@@ -295,12 +298,14 @@ fn press(ui: &mut interface::Ui, v: &Value) {
 /// `{"tap": [x, y]}` work the interface, `{"hour": 0..3}`, `{"player": "car"}`, `{"camera": n}`, `{"place": n}` and
 /// `{"teleport": [x, z, heading]}` go to the game, `{"view": {"pos", "target", "fov"}}` fixes the eye (`null` lets go),
 /// and the rest writes this device's settings (`near`, `mid`, `detail`, `walls`, `solids`, `instances`, `profile`,
-/// `pace`, `interface`).
+/// `pace`, `interface`, `models`, `post`).
 fn apply_control(v: &Value, s: &mut Settings, game: &mut Game, session: &mut Session, ui: &mut interface::Ui) {
     let flag = |k: &str, cur: bool| v[k].as_bool().unwrap_or(cur);
     let num = |k: &str, cur: f32| v[k].as_f64().map(|x| x as f32).unwrap_or(cur);
     s.profile = flag("profile", s.profile);
     s.interface = flag("interface", s.interface);
+    s.models = flag("models", s.models);
+    s.post = flag("post", s.post);
     s.show.walls = flag("walls", s.show.walls);
     s.show.solids = flag("solids", s.show.solids);
     s.show.instances = flag("instances", s.show.instances);
@@ -556,6 +561,8 @@ fn main() {
             show: Show { reach: Reach { detail: 110.0, near: 260.0, mid: 1400.0, far: 7000.0 }, walls: true, solids: true, instances: true },
             pace: boot["pace"].as_i64().unwrap_or(1) as i32,
             interface: true,
+            models: true,
+            post: true,
             view: None,
             budget: 200_000,
             govern: true,
@@ -657,7 +664,7 @@ fn main() {
             let waited = t2.elapsed();
             // By night, what is bright in the frame on display glows over this one.
             let glow_gain = frame[7] * 0.6;
-            if let Err(e) = glow.run(ctx, glow_gain, 0.72, g::vita2d_get_current_fb(), 960) {
+            if let Err(e) = if set.post { glow.run(ctx, glow_gain, 0.72, g::vita2d_get_current_fb(), 960) } else { Ok(()) } {
                 pocketjs_vita::vita_log(format_args!("newyork: {e}"));
             }
             g::vita2d_pool_reset();
@@ -671,9 +678,16 @@ fn main() {
             stats = city.draw(ctx, &vp, eye, &frame, &look, night, shadows.texture(), &set.show, frame_no);
             // What moves: the traffic, and the player's vehicle.
             placed.clear();
-            if game.traffic_on {
+            if game.traffic_on && set.models {
+                // Cars in view and within the middle distance (past it a car is a few pixels under the haze).
+                let planes = mat::planes(&vp);
+                let reach = set.show.reach.mid.clamp(300.0, 700.0);
                 for v in game.vehicles().iter().filter(|v| v.placed()) {
                     let Some(m) = kinds[v.kind as usize] else { continue };
+                    let (dx, dz) = (v.x - eye.x, v.z - eye.z);
+                    if dx * dx + dz * dz > reach * reach || !ny_view::visible(&planes, [v.x - 7.0, -1.0, v.z - 7.0], [v.x + 7.0, 5.0, v.z + 7.0]) {
+                        continue;
+                    }
                     // Paint is linear; the city is lit in the display's space.
                     let tint = display(v.paint);
                     placed.push((m, city::placed(v.x, 0.0, v.z, v.yaw, v.pitch, v.roll, tint)));
@@ -718,8 +732,12 @@ fn main() {
                     }
                 }
             }
-            stats.tris[2] += city.draw_models(ctx, &vp, &frame, &look, shadows.texture(), &mut placed);
-            glow.add(ctx, glow_gain);
+            if set.models {
+                stats.tris[2] += city.draw_models(ctx, &vp, &frame, &look, shadows.texture(), &mut placed);
+            }
+            if set.post {
+                glow.add(ctx, glow_gain);
+            }
             // vita2d draws (the interface, the menu) expect its own viewport and no depth.
             g::sceGxmSetViewport(ctx, 480.0, 480.0, 272.0, -272.0, 0.5, 0.5);
             gpu::state_overlay(ctx, false);

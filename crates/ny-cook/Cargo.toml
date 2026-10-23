@@ -14,3 +14,4 @@ sha2 = "0.10"
 texpresso = { version = "2", features = ["rayon"] }
 image = { version = "0.25", default-features = false, features = ["png"] }
 meshopt = "0.6"
+earcutr = "0.4"

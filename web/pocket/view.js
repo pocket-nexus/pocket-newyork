@@ -257,6 +257,24 @@ function wallMaterial(pack, tex) {
   return m;
 }
 
+/** Kinds drawn at each of their instances (`ny_pack::kind::instanced`). */
+const instanced = (kind) => kind === 4 || kind === 5 || kind === 6 || kind === 8;
+
+const pictureMaterials = new Map();
+/** A sign or a billboard: its picture over its scale, lit, or as it is where its vertices' tint alpha says so. */
+function pictureMaterial(pack, tex) {
+  if (pictureMaterials.has(tex)) return pictureMaterials.get(tex);
+  const m = new THREE.MeshBasicNodeMaterial();
+  const n = normalize(normalWorld);
+  const lit = mix(U.ground, U.sky, n.y.mul(0.5).add(0.5)).add(U.sun.mul(max(dot(n, U.sunDir), 0.0)));
+  const light = mix(lit, vec3(1), step(float(0.5), attribute('tint', 'vec4').a));
+  m.colorNode = texture(textureOf(pack, tex), attribute('tuv', 'vec2')).rgb.mul(pack.texs[tex].metres).mul(light);
+  m.side = THREE.DoubleSide;
+  m.fog = true;
+  pictureMaterials.set(tex, m);
+  return m;
+}
+
 function wallGeometryOf(pack, b, st = streamsOf(pack)) {
   const { dv } = pack;
   const s = { off: st.wal };
@@ -316,11 +334,11 @@ async function main() {
   const items = [];
   const counts = [0, 0, 0, 0];
   const spans = new Uint32Array(pack.buf, pack.sec('SPAN').off, pack.sec('SPAN').size / 4);
-  const whole = (b) => (b.kind >= 4 ? b.instCount : b.idxCount);
-  const all = (first, count, cell = 0xffffffff) => {
-    for (let i = first; i < first + count; i++) if (whole(pack.batches[i]) > 0) items.push({ batch: i, from: 0, to: whole(pack.batches[i]), cell });
+  const whole = (b) => (instanced(b.kind) ? b.instCount : b.idxCount);
+  const all = (first, count, lvl, cell = 0xffffffff) => {
+    for (let i = first; i < first + count; i++) if (whole(pack.batches[i]) > 0) items.push({ batch: i, from: 0, to: whole(pack.batches[i]), cell, lvl });
   };
-  const runs = (first, count, chosen) => {
+  const runs = (first, count, chosen, lvl) => {
     for (let i = first; i < first + count; i++) {
       const b = pack.batches[i];
       if (b.spans === 0xffffffff) continue;
@@ -329,7 +347,7 @@ async function main() {
         const s0 = k;
         while (k < chosen.length && chosen[k]) k++;
         const from = spans[b.spans + s0], to = spans[b.spans + k];
-        if (to > from) items.push({ batch: i, from, to });
+        if (to > from) items.push({ batch: i, from, to, lvl });
       }
     }
   };
@@ -342,7 +360,7 @@ async function main() {
     if (!seen(rmin, rmax)) continue;
     if (dist(p, rmin, rmax) >= reach.far) continue;
     if (dist(p, rmin, rmax) >= reach.mid) {
-      if (r.count) { counts[2]++; all(r.first, r.count); }
+      if (r.count) { counts[2]++; all(r.first, r.count, 'far'); }
       continue;
     }
     const farBlocks = new Array(rb * rb).fill(false);
@@ -357,7 +375,7 @@ async function main() {
       if (d >= reach.mid) { farBlocks[j * rb + i] = true; anyFar = true; continue; }
       const block = pack.blocks[bz * city.blocksX + bx];
       if (d >= reach.near) {
-        if (block.count) { counts[1]++; all(block.first, block.count); }
+        if (block.count) { counts[1]++; all(block.first, block.count, 'mid'); }
         continue;
       }
       const midCells = new Array(bc * bc).fill(false);
@@ -372,12 +390,12 @@ async function main() {
         if (cell.count + cell.detail.count === 0 || !seen(cell.min, cell.max)) continue;
         const cellIndex = cz * city.cellsX + cx;
         counts[0]++;
-        all(cell.first, cell.count, cellIndex);
-        if (dc < reach.detail && cell.detail.count) { counts[3]++; all(cell.detail.first, cell.detail.count, cellIndex); }
+        all(cell.first, cell.count, 'near', cellIndex);
+        if (dc < reach.detail && cell.detail.count) { counts[3]++; all(cell.detail.first, cell.detail.count, 'detail', cellIndex); }
       }
-      if (anyMid && block.count) { counts[1]++; runs(block.first, block.count, midCells); }
+      if (anyMid && block.count) { counts[1]++; runs(block.first, block.count, midCells, 'mid'); }
     }
-    if (anyFar && r.count) { counts[2]++; runs(r.first, r.count, farBlocks); }
+    if (anyFar && r.count) { counts[2]++; runs(r.first, r.count, farBlocks, 'far'); }
   }
   const mats = [solidMaterial(false), solidMaterial(true)];
   const instMats = [solidMaterial(false, true), solidMaterial(true, true)];
@@ -389,19 +407,19 @@ async function main() {
   const byLevel = {};
   for (const it of items) {
     const b = pack.batches[it.batch];
-    const n = b.kind >= 4 ? (b.idxCount / 3) * (it.to - it.from) : (it.to - it.from) / 3;
+    const n = instanced(b.kind) ? (b.idxCount / 3) * (it.to - it.from) : (it.to - it.from) / 3;
     byKind[b.kind] = (byKind[b.kind] ?? 0) + n;
-    const lvl = it.cell !== undefined && it.cell !== 0xffffffff ? 'cell' : 'resident';
+    const lvl = `${it.lvl}:${b.kind}`;
     byLevel[lvl] = (byLevel[lvl] ?? 0) + n;
     let mesh;
     const st = streamsOf(pack, it.cell);
-    if (b.kind >= 4) {
+    if (instanced(b.kind)) {
       const key = `${b.kind}:${b.vtxFirst}:${b.idxFirst}`;
-      if (!shapes.has(key)) shapes.set(key, b.kind === 6 ? wallGeometryOf(pack, b) : geometryOf(pack, b));
+      if (!shapes.has(key)) shapes.set(key, b.kind === 6 || b.kind === 8 ? wallGeometryOf(pack, b) : geometryOf(pack, b));
       const g = shapes.get(key).clone();
       const n = it.to - it.from;
       const tint = new Uint8Array(n * 4);
-      const im = new THREE.InstancedMesh(g, b.kind === 6 ? leafMaterial(pack, b.tex) : instMats[b.kind === 5 ? 1 : 0], n);
+      const im = new THREE.InstancedMesh(g, b.kind === 6 ? leafMaterial(pack, b.tex) : b.kind === 8 ? pictureMaterial(pack, b.tex) : instMats[b.kind === 5 ? 1 : 0], n);
       const mm = new THREE.Matrix4();
       for (let k = 0; k < n; k++) {
         const at = st.inst + (b.instFirst + it.from + k) * 52;
@@ -414,12 +432,12 @@ async function main() {
       mesh = im;
       tris += (b.idxCount / 3) * n;
     } else {
-      if (!geoms.has(it.batch)) geoms.set(it.batch, b.kind === 0 ? wallGeometryOf(pack, b, st) : b.kind === 3 ? groundGeometryOf(pack, b, st) : geometryOf(pack, b, st));
+      if (!geoms.has(it.batch)) geoms.set(it.batch, b.kind === 0 || b.kind === 7 ? wallGeometryOf(pack, b, st) : b.kind === 3 ? groundGeometryOf(pack, b, st) : geometryOf(pack, b, st));
       const g0 = geoms.get(it.batch);
       if (!g0) continue;
       const g = g0.clone();
       g.setDrawRange(it.from, it.to - it.from);
-      mesh = new THREE.Mesh(g, b.kind === 0 ? wallMaterial(pack, b.tex) : b.kind === 3 ? groundMaterial(pack, b.tex) : mats[b.kind === 2 ? 1 : 0]);
+      mesh = new THREE.Mesh(g, b.kind === 0 ? wallMaterial(pack, b.tex) : b.kind === 7 ? pictureMaterial(pack, b.tex) : b.kind === 3 ? groundMaterial(pack, b.tex) : mats[b.kind === 2 ? 1 : 0]);
       tris += (it.to - it.from) / 3;
     }
     mesh.frustumCulled = false;

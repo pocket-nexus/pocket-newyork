@@ -42,3 +42,20 @@ export function describeMaterial(m) {
   };
 }
 
+
+/** The scene's materials in the order scene.js numbers them (`materials[id]` of scene.json): the drawn objects in
+ *  traversal order, each object's materials in turn. Every export run builds the same scene, so the numbers agree. */
+export function materialOrder(scene) {
+  const out = [];
+  const seen = new Set();
+  scene.traverse((o) => {
+    if (!o.isMesh && !o.isLine && !o.isPoints && !o.isSprite) return;
+    for (const m of Array.isArray(o.material) ? o.material : [o.material]) {
+      if (!seen.has(m)) {
+        seen.add(m);
+        out.push(m);
+      }
+    }
+  });
+  return out;
+}

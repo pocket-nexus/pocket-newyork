@@ -106,6 +106,9 @@ async function build() {
   NYC.buildRoadPaint(scene, traffic.network);
   const controllers = new NYC.ThirdPersonControllerManager(scene, colliders);
   const cameras = new NYC.CameraSystem(renderer.domElement, controllers);
+  // Applying an hour moves the sky to the end of the scene's children (LightingSystem.bakeEnvironmentMap adds it
+  // again): once here, so that every export run numbers the scene's materials alike, whichever hours it applies.
+  lighting.applyPreset('golden', true);
   scene.updateMatrixWorld(true);
   log(`built in ${Math.round(performance.now() - t0)} ms`);
   return { renderer, scene, lighting, cityGrid, boroughs, cityBlocks, colliders, streetDetails, traffic, highway, controllers, cameras };

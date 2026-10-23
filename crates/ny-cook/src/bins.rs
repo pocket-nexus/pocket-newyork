@@ -231,7 +231,7 @@ impl Written {
                 None => &mut self.own,
             };
             let vtx_first = match kind {
-                pack::kind::WALL => st.walls.len(),
+                pack::kind::WALL | pack::kind::PICTURE => st.walls.len(),
                 pack::kind::GROUND => st.grounds.len(),
                 _ => st.solids.len(),
             } as u32;
@@ -239,7 +239,7 @@ impl Written {
                 let v = &bin.verts[i as usize];
                 let pos = quantize(v.p, origin, span);
                 match kind {
-                    pack::kind::WALL => {
+                    pack::kind::WALL | pack::kind::PICTURE => {
                         let q = |x: f32| (x / pack::UV_RANGE * 32767.0).round().clamp(-32767.0, 32767.0) as i16;
                         st.walls.push(WallVertex { pos, normal: v.n, ao: v.ao, uv: [q(v.uv[0]), q(v.uv[1])], tint: v.a, pad: [0; 2] });
                     }
