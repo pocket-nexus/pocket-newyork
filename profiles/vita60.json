@@ -3,8 +3,9 @@
   "cell": 128,
   "block_cells": 4,
   "region_blocks": 4,
-  "keep": [1.0, 0.35, 0.12],
-  "error": [0.0, 0.03, 0.08],
-  "mid_radius": 4.0,
-  "far_radius": 30.0
+  "keep": [0.6, 0.3, 0.1, 0.35],
+  "error": [0.01, 0.04, 0.1, 0.05],
+  "mid_radius": 6.0,
+  "far_radius": 40.0,
+  "detail_radius": 2.5
 }

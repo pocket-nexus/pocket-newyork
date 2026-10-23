@@ -4,9 +4,10 @@
 //! size, zero). Sections start on 16-byte boundaries. A runtime reads the header and the table, then each section
 //! it wants.
 //!
-//! The city is cut three ways. A *cell* is a square of `City::cell` metres, drawn at the near level of detail. A
-//! *block* is `City::block_cells` squared cells, drawn at the mid level. A *region* is `City::region_blocks`
-//! squared blocks, drawn at the far level. Something larger than its cell (a bridge, a tall tower's wall) belongs
+//! The city is cut three ways. A *cell* is a square of `City::cell` metres, drawn at the near level of detail, and
+//! its small things (street furniture, signs, rooftop plant) at the detail level, closer still. A *block* is
+//! `City::block_cells` squared cells, drawn at the mid level. A *region* is `City::region_blocks` squared blocks,
+//! drawn at the far level. Something larger than its cell (a bridge, a tall tower's wall) belongs
 //! to the cell its centre lies in, and that cell's bounds grow to hold it.
 //!
 //! | Tag    | Contents |
@@ -21,6 +22,8 @@
 //! | `VSOL` | `SolidVertex` records: everything coloured by vertex |
 //! | `VGND` | `GroundVertex` records: surfaces under a picture that repeats over the ground |
 //! | `IDX0` | `u16` indices, relative to each batch's first vertex |
+//! | `INST` | `Instance` records of instanced batches |
+//! | `SPAN` | `u32` offsets: per mid batch, where each of its block's cells starts in its indices (or instances), and the end (`City::block_cells² + 1`); per far batch the same for its region's blocks |
 //! | `TEXS` | `TexEntry` table |
 //! | `TDAT` | the pictures' levels, largest first, as `TexEntry` says |
 //! | `PRST` | `Preset` table: the hours the reference offers |
@@ -34,7 +37,7 @@ use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
 pub const MAGIC: u32 = u32::from_le_bytes(*b"NYPK");
-pub const VERSION: u32 = 1;
+pub const VERSION: u32 = 4;
 
 pub const fn tag(t: &[u8; 4]) -> u32 {
     u32::from_le_bytes(*t)
@@ -49,12 +52,14 @@ pub const VWAL: u32 = tag(b"VWAL");
 pub const VSOL: u32 = tag(b"VSOL");
 pub const VGND: u32 = tag(b"VGND");
 pub const IDX0: u32 = tag(b"IDX0");
+pub const INST: u32 = tag(b"INST");
+pub const SPAN: u32 = tag(b"SPAN");
 pub const TEXS: u32 = tag(b"TEXS");
 pub const TDAT: u32 = tag(b"TDAT");
 pub const PRST: u32 = tag(b"PRST");
 
-/// Levels of detail: near by cell, mid by block, far by region.
-pub const LODS: usize = 3;
+/// Levels of detail: near by cell, mid by block, far by region, and the cell's small things (detail).
+pub const LODS: usize = 4;
 
 /// The city's frame: metres, x east, y up, z south (towards the Battery), as the reference has it.
 #[derive(Clone, Copy, Debug, Default)]
@@ -103,7 +108,15 @@ pub mod kind {
     pub const OPEN: u32 = 2;
     /// Surfaces under a picture that repeats over the ground: `GroundVertex`.
     pub const GROUND: u32 = 3;
-    pub const COUNT: usize = 4;
+    /// One shape drawn at every `Instance` of the batch: `SolidVertex` in the shape's own frame.
+    pub const SOLID_INST: u32 = 4;
+    /// As `SOLID_INST`, seen from both sides.
+    pub const OPEN_INST: u32 = 5;
+    pub const COUNT: usize = 6;
+
+    pub fn instanced(kind: u32) -> bool {
+        kind == SOLID_INST || kind == OPEN_INST
+    }
 }
 
 /// A range of the `BTCH` table.
@@ -115,12 +128,14 @@ pub struct Draws {
 }
 
 /// A square of the city at the near level of detail. `min`, `max`: bounds of everything its batches draw.
+/// `detail`: its small things, drawn only closer than the near level reaches.
 #[derive(Clone, Copy, Debug, Default)]
 #[repr(C)]
 pub struct Cell {
     pub min: [f32; 3],
     pub max: [f32; 3],
     pub near: Draws,
+    pub detail: Draws,
 }
 
 /// `City::block_cells` squared cells at the mid level.
@@ -142,7 +157,13 @@ pub struct Region {
 }
 
 /// One draw. Its vertices are `u16` positions normalized over the box `origin` .. `origin + span`, which is also
-/// its bounds; `tex` is the picture it reads (`NO_TEX` for none).
+/// its bounds; `tex` is the picture it reads (`NO_TEX` for none). An instanced batch (`kind::instanced`) draws
+/// its vertices, in the shape's own frame, once per record `inst_first .. inst_first + inst_count` of `INST`.
+/// Instanced batches of one shape share its vertices and indices.
+///
+/// A mid batch has its triangles (an instanced one, its instances) ordered by the cell of its block they belong
+/// to, and a far batch by the block of its region: `spans` is where its record in `SPAN` starts (`NO_SPANS` for a
+/// near or detail batch). A frame draws, of a block whose cells are partly near, the runs of the other cells.
 #[derive(Clone, Copy, Debug, Default)]
 #[repr(C)]
 pub struct Batch {
@@ -154,6 +175,21 @@ pub struct Batch {
     pub idx_count: u32,
     pub origin: [f32; 3],
     pub span: [f32; 3],
+    pub inst_first: u32,
+    pub inst_count: u32,
+    pub spans: u32,
+    pub pad: u32,
+}
+
+pub const NO_SPANS: u32 = u32::MAX;
+
+/// Where one instance stands: the rows of a 3 × 4 matrix from the shape's frame to the world, and what its colour
+/// is to the shape's (linear, 128 = as the shape has it), 52 bytes.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[repr(C)]
+pub struct Instance {
+    pub rows: [[f32; 4]; 3],
+    pub tint: [u8; 4],
 }
 
 pub const NO_TEX: u32 = u32::MAX;
@@ -358,8 +394,10 @@ mod tests {
         assert_eq!(core::mem::size_of::<WallVertex>(), 20);
         assert_eq!(core::mem::size_of::<SolidVertex>(), 20);
         assert_eq!(core::mem::size_of::<GroundVertex>(), 16);
-        assert_eq!(core::mem::size_of::<Batch>(), 48);
+        assert_eq!(core::mem::size_of::<Batch>(), 64);
+        assert_eq!(core::mem::size_of::<Instance>(), 52);
         assert_eq!(core::mem::size_of::<TexEntry>(), 32);
+        assert_eq!(core::mem::size_of::<Cell>(), 40);
     }
 
     #[test]

@@ -66,6 +66,8 @@ pub struct Geometry {
 #[derive(Deserialize, Clone, Debug)]
 pub struct Material {
     pub id: usize,
+    #[serde(default)]
+    pub uuid: String,
     #[serde(rename = "type")]
     pub kind: String,
     #[serde(default)]
@@ -186,6 +188,12 @@ impl Ir {
             Err(_) => HashMap::new(),
         };
         Ok(Ir { dir: dir.to_path_buf(), geometries: scene.geometries, materials: scene.materials, objects: scene.objects, bytes, probes })
+    }
+
+    /// The facade style key of a material (`facade::key`), when a factory made it.
+    pub fn material_key(&self, id: usize) -> Option<String> {
+        let m = self.materials.get(id)?;
+        Some(crate::facade::key(m.factory.as_deref()?, m.args.as_ref()?))
     }
 
     pub fn probe(&self, object: usize) -> Option<Probe> {

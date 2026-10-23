@@ -286,6 +286,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "ny-view"
+version = "0.1.0"
+dependencies = [
+ "ny-pack",
+]
+
+[[package]]
 name = "png"
 version = "0.18.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"

@@ -1,0 +1,13 @@
+[package]
+name = "ny-view"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "What a frame of Pocket New York draws: the levels of detail of the pack's places by their distance, and the runs of their batches"
+
+[features]
+default = ["std"]
+std = ["ny-pack/std"]
+
+[dependencies]
+ny-pack = { path = "../ny-pack", default-features = false }
