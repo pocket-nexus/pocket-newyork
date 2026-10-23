@@ -13,6 +13,10 @@ void main(
     uniform float4x4 uVp,
     uniform float4 uBox[2],
     uniform float4 uFrame[6],
+#ifdef NIGHT
+    uniform float4 uLampMap,
+    out float3 oLamp : TEXCOORD5,
+#endif
     out float4 oPosition : POSITION,
     out float2 oUv : TEXCOORD0,
     out float2 oMap : TEXCOORD1,
@@ -40,5 +44,9 @@ void main(
     oLight = float4(hemi(seen, uFrame) * (aAo * (crown * 0.75 + 0.25)), (max(s, 0.0) + max(-s, 0.0) * 0.25) * aAo * reach);
     // A card takes the tree's tint over the picture; bark keeps its colour (alpha: which it is).
     oColor = float4(saturate(lerp(aBark.rgb, aTint.rgb * 2.0, aBark.a)), haze_of(world, oPosition.w, uFrame));
+#ifdef NIGHT
+    // (a lamp lights the crown from below and within)
+    oLamp = float3(world.xz * uLampMap.xz + uLampMap.yw, saturate(1.4 - world.y * 0.1) * aAo * 0.5);
+#endif
     oLeaf = aBark.a;
 }

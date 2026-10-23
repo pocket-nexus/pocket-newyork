@@ -820,6 +820,9 @@ fn hours(ir: &std::path::Path) -> Vec<pack::Preset> {
                 tone: [0, 1, 2, 3].map(|k| h["tone"][k].as_f64().unwrap_or(0.0) as f32),
                 env_horizon: v3(&h["env"]["horizon"]),
                 env_up: v3(&h["env"]["up"]),
+                bloom: [f(&h["bloom"]["strength"]), f(&h["bloom"]["threshold"])],
+                road_wetness: f(&h["roadWetness"]),
+                pad2: 0.0,
             }
         })
         .collect()
@@ -969,18 +972,25 @@ fn uncover(q: &mut facade::Quad, heights: &heights::Grid, trim: bool) -> bool {
     true
 }
 
-/// The light the lamps leave on the ground by night, over the grid of heights at twice its cell: each lamp a pool as
-/// wide as it stands high (and a third more), brightest under it, in its own colour.
+/// The light the lamps leave on the ground by night, over the grid of heights at twice its cell, at the reference's
+/// full lamp scale (its `lampScale` 1): each lamp as street-details.js lights a cobra head, a SpotLight of 88 cd
+/// pointing down, its cone 0.96 rad with a penumbra of 0.82, reaching 25 m with a decay of 1.25, on ground it lights as
+/// three.js lights a diffuse face (irradiance / π, what a white face shows), in its own colour.
 fn lamp_light(heights: &heights::Grid, lamps: &[([f32; 3], [f32; 3])]) -> Vec<u8> {
     let h = &heights.head;
     let step = h.step * 2.0;
     let (w, d) = (h.w.div_ceil(2), h.h.div_ceil(2));
     let mut light = vec![[0.0f32; 3]; (w * d) as usize];
+    let smooth = |a: f32, b: f32, x: f32| {
+        let t = ((x - a) / (b - a)).clamp(0.0, 1.0);
+        t * t * (3.0 - 2.0 * t)
+    };
+    let (cone, inner) = (0.96f32.cos(), (0.96f32 * (1.0 - 0.82)).cos());
     for (p, color) in lamps {
         let top = color[0].max(color[1]).max(color[2]).max(1e-3);
         let tint = color.map(|c| c / top);
-        let ground = 0.0f32;
-        let r = ((p[1] - ground) * 1.3).clamp(5.0, 14.0);
+        let high = p[1].max(2.0);
+        let r = (high * 0.96f32.tan()).min(25.0);
         let (cx, cz) = ((p[0] - h.x0) / step, (p[2] - h.z0) / step);
         let cells = (r / step).ceil() as i32;
         for j in -cells..=cells {
@@ -990,11 +1000,14 @@ fn lamp_light(heights: &heights::Grid, lamps: &[([f32; 3], [f32; 3])]) -> Vec<u8
                     continue;
                 }
                 let (wx, wz) = (h.x0 + (x as f32 + 0.5) * step, h.z0 + (z as f32 + 0.5) * step);
-                let dd = ((wx - p[0]).powi(2) + (wz - p[2]).powi(2)).sqrt() / r;
-                if dd >= 1.0 {
+                let flat = ((wx - p[0]).powi(2) + (wz - p[2]).powi(2)).sqrt();
+                let dist = (flat * flat + high * high).sqrt();
+                let down = high / dist;
+                let reach = (1.0 - (dist / 25.0).powi(4)).max(0.0).powi(2) / dist.powf(1.25).max(0.01);
+                let f = 88.0 * smooth(cone, inner, down) * reach * down / core::f32::consts::PI;
+                if f <= 0.0 {
                     continue;
                 }
-                let f = (1.0 - dd * dd).powi(2) * 0.55;
                 let cell = &mut light[(z as u32 * w + x as u32) as usize];
                 for k in 0..3 {
                     cell[k] += tint[k] * f;
@@ -1002,11 +1015,12 @@ fn lamp_light(heights: &heights::Grid, lamps: &[([f32; 3], [f32; 3])]) -> Vec<u8
             }
         }
     }
-    // The light a channel's 31 (63 for green) stands for.
-    const FULL: f32 = 1.2;
+    // The light a channel's 31 (63 for green) stands for; a channel holds the square root of its share, so that the
+    // dim edges of a pool keep their steps.
+    const FULL: f32 = 3.0;
     let mut out = ny_pack::bytes_of(&ny_pack::Heights { x0: h.x0, z0: h.z0, step, unit: FULL, w, h: d, pad: [0; 2] }).to_vec();
     for c in &light {
-        let q = |v: f32, max: f32| ((v / FULL).clamp(0.0, 1.0) * max).round() as u16;
+        let q = |v: f32, max: f32| ((v / FULL).clamp(0.0, 1.0).sqrt() * max).round() as u16;
         let v = q(c[0], 31.0) << 11 | q(c[1], 63.0) << 5 | q(c[2], 31.0);
         out.extend_from_slice(&v.to_le_bytes());
     }

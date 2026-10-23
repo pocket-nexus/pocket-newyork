@@ -1,9 +1,16 @@
 uniform sampler2D uLeaves;
 uniform sampler2D uShadow;
+#ifdef NIGHT
+uniform sampler2D uLamp;
+#endif
 // See frame.cg
 uniform float4 uLook[3];
 
-half4 main(float2 vUv : TEXCOORD0, float2 vMap : TEXCOORD1, float vHeight : TEXCOORD2, float vLeaf : TEXCOORD3, half4 vLight : COLOR0, half4 vColor : COLOR1) : COLOR
+half4 main(float2 vUv : TEXCOORD0, float2 vMap : TEXCOORD1, float vHeight : TEXCOORD2, float vLeaf : TEXCOORD3,
+#ifdef NIGHT
+    float3 vLamp : TEXCOORD5,
+#endif
+    half4 vLight : COLOR0, half4 vColor : COLOR1) : COLOR
 {
     half4 t = (half4)tex2D(uLeaves, vUv);
     // Bark reads white and opaque: its colour is its own.
@@ -11,7 +18,12 @@ half4 main(float2 vUv : TEXCOORD0, float2 vMap : TEXCOORD1, float vHeight : TEXC
     if (leaf.a < 0.5)
         discard;
     half lit = (half)saturate((vHeight - tex2D(uShadow, vMap).r * SHADOW_UNIT) * SHADOW_K + 1.0);
+    half3 light = vLight.rgb + (half3)uLook[1].rgb * (vLight.a * lit);
+#ifdef NIGHT
+    half3 l = (half3)tex2D(uLamp, vLamp.xy).rgb;
+    light += l * l * (half)(uLook[2].x * vLamp.z);
+#endif
     half3 a = leaf.rgb * vColor.rgb;
-    half3 c = a * a * (vLight.rgb + (half3)uLook[1].rgb * (vLight.a * lit)) * (half)LIGHT_SCALE;
+    half3 c = a * a * light * (half)LIGHT_SCALE;
     return half4(shown(c, vColor.a, uLook), 1.0);
 }

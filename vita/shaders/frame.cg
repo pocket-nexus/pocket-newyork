@@ -4,11 +4,12 @@
 //   [2] rgb  light from the ground over LIGHT_SCALE (linear); w: how bright the rooms are (the hour's interiorGlow)
 //   [3] x    most haze a point can be under; y: from world x and z to the shadow window's texture coordinates (a
 //            scale), zw: their offsets
-//   [4] xyz  the eye
+//   [4] xyz  the eye; w: how wet the roadway is
 //   [5] rgb  the sky a surface reflects (linear)
 // And per draw in the fragment programs (uLook): [0] the hour's tone curve (a, b, c, d); [1] rgb: the sun over
-// LIGHT_SCALE (linear), a: what the draw's picture is over (its scale); [2] x: the lamps' light, yzw: the haze's
-// colour in the draw's direction, as the display shows it.
+// LIGHT_SCALE (linear), a: what the draw's picture is over (its scale); [2] x: the lamps' light (what a full channel
+// of uLamp stands for, its square taken, at the hour's lamp scale, over LIGHT_SCALE), yzw: the haze's colour in the
+// draw's direction, as the display shows it.
 //
 // Light is linear, as the reference lights; a fragment ends with the tone curve the export fitted to the
 // reference's grade and ACES for the hour, y = x(ax + b) / (x(cx + d) + 1) as the display shows it, then the

@@ -1,6 +1,6 @@
-//! The glow of what is bright, by night.
+//! The glow of what is bright: the reference's bloom.
 //!
-//! The scene is drawn straight into the display's multisampled surface. At night a quarter-size chain takes the
+//! The scene is drawn straight into the display's multisampled surface. A quarter-size chain takes the
 //! frame the display is showing (the one before this), keeps what is bright in it (lit windows, lamps, signs) and
 //! blurs it, and the result is added over this frame: lights glow one frame late, and no pass copies the scene.
 //! Every tap's texture coordinate comes from the vertex stage, so no fragment program computes one (from Pocket

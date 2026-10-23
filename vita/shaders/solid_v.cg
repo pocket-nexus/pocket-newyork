@@ -10,6 +10,11 @@ void main(
     uniform float4x4 uMvp,
     uniform float4 uBox[2],
     uniform float4 uFrame[6],
+#ifdef NIGHT
+    uniform float4 uLampMap,
+    // xy: the lamps' light texture coordinates; z: how much of it reaches this high
+    out float3 oLamp : TEXCOORD3,
+#endif
     out float4 oPosition : POSITION,
     out float2 oMap : TEXCOORD1,
     out float oHeight : TEXCOORD2,
@@ -34,4 +39,7 @@ void main(
     float on = lerp(uFrame[1].w, 1.0, step(0.998, aColor.a));
     oGlow = float4(aGlow.rgb * (aGlow.a * GLOW_RANGE * on), 0.0);
     oSpec = reflection(world, aNormal, aGloss, uFrame);
+#ifdef NIGHT
+    oLamp = float3(world.xz * uLampMap.xz + uLampMap.yw, saturate(1.2 - world.y * 0.1));
+#endif
 }

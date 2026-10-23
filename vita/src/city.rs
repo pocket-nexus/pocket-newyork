@@ -221,6 +221,12 @@ pub struct CityGpu {
     ground: Pass,
     ground_night: Pass,
     leaf: Pass,
+    /// By night: the same, lit by the lamps too.
+    solid_night: Pass,
+    open_night: Pass,
+    inst_night: Pass,
+    inst_open_night: Pass,
+    leaf_night: Pass,
     picture: Pass,
     picture_inst: Pass,
     /// The lamps' light on the ground by night, and from world x and z to its texture coordinates.
@@ -288,6 +294,13 @@ impl CityGpu {
         let inst_open = Pass::new(gpu.program("inst_open", &format!("{defines}#define OPEN\n"), INST_V, SOLID_F, &inst_streams, msaa, opaque)?, ["", ""]);
         let leaf_streams = [Stream { stride: 20, instanced: false, attrs: &LEAF_ATTRS }, Stream { stride: 52, instanced: true, attrs: &INST_ATTRS }];
         let leaf = Pass::new(gpu.program("leaf", &defines, LEAF_V, LEAF_F, &leaf_streams, msaa, opaque)?, ["uLeaves", ""]);
+        let night = format!("{defines}#define NIGHT\n");
+        let night_open = format!("{defines}#define NIGHT\n#define OPEN\n");
+        let solid_night = Pass::new(gpu.program("solid_night", &night, SOLID_V, SOLID_F, &solid_stream, msaa, opaque)?, ["", ""]);
+        let open_night = Pass::new(gpu.program("open_night", &night_open, SOLID_V, SOLID_F, &solid_stream, msaa, opaque)?, ["", ""]);
+        let inst_night = Pass::new(gpu.program("inst_night", &night, INST_V, SOLID_F, &inst_streams, msaa, opaque)?, ["", ""]);
+        let inst_open_night = Pass::new(gpu.program("inst_open_night", &night_open, INST_V, SOLID_F, &inst_streams, msaa, opaque)?, ["", ""]);
+        let leaf_night = Pass::new(gpu.program("leaf_night", &night, LEAF_V, LEAF_F, &leaf_streams, msaa, opaque)?, ["uLeaves", ""]);
         let picture_stream = [Stream { stride: 20, instanced: false, attrs: &PICTURE_ATTRS }];
         let picture_streams = [Stream { stride: 20, instanced: false, attrs: &PICTURE_ATTRS }, Stream { stride: 52, instanced: true, attrs: &INST_ATTRS[..3] }];
         let picture = Pass::new(gpu.program("picture", &defines, PICTURE_V, PICTURE_F, &picture_stream, msaa, opaque)?, ["uPicture", ""]);
@@ -388,6 +401,11 @@ impl CityGpu {
             ground,
             ground_night,
             leaf,
+            solid_night,
+            open_night,
+            inst_night,
+            inst_open_night,
+            leaf_night,
             picture,
             picture_inst,
             lamp,
@@ -460,9 +478,9 @@ impl CityGpu {
                         &self.wall
                     }
                 }
-                kind::SOLID => &self.solid,
-                kind::OPEN => &self.open,
-                kind::SOLID_INST => &self.inst,
+                kind::SOLID => if night { &self.solid_night } else { &self.solid },
+                kind::OPEN => if night { &self.open_night } else { &self.open },
+                kind::SOLID_INST => if night { &self.inst_night } else { &self.inst },
                 kind::GROUND => {
                     if night {
                         &self.ground_night
@@ -470,10 +488,10 @@ impl CityGpu {
                         &self.ground
                     }
                 }
-                kind::LEAF_INST => &self.leaf,
+                kind::LEAF_INST => if night { &self.leaf_night } else { &self.leaf },
                 kind::PICTURE => &self.picture,
                 kind::PICTURE_INST => &self.picture_inst,
-                _ => &self.inst_open,
+                _ => if night { &self.inst_open_night } else { &self.inst_open },
             };
             if current.map(|c| c.0) != Some(b.kind) {
                 pass.bind(ctx, shadow, &self.lamp);
@@ -579,7 +597,7 @@ impl CityGpu {
     ///
     /// # Safety
     /// Inside a scene on `ctx`, after `draw` this frame.
-    pub unsafe fn draw_models(&mut self, ctx: *mut g::SceGxmContext, vp: &Mat4, frame: &Frame, look: &[f32; 12], haze: &Haze, shadow: &g::SceGxmTexture, placed: &mut Vec<(usize, Instance)>) -> u32 {
+    pub unsafe fn draw_models(&mut self, ctx: *mut g::SceGxmContext, vp: &Mat4, frame: &Frame, look: &[f32; 12], haze: &Haze, night: bool, shadow: &g::SceGxmTexture, placed: &mut Vec<(usize, Instance)>) -> u32 {
         self.ring.next_frame();
         placed.sort_by_key(|p| p.0);
         placed.truncate(MODEL_INSTANCES);
@@ -596,11 +614,17 @@ impl CityGpu {
             let model = self.models[m];
             for bi in model.first..model.first + model.count {
                 let b = self.batches[bi as usize];
-                let pass = if b.kind == kind::OPEN_INST { &self.inst_open } else { &self.inst };
+                let pass = match (b.kind == kind::OPEN_INST, night) {
+                    (true, true) => &self.inst_open_night,
+                    (true, false) => &self.inst_open,
+                    (false, true) => &self.inst_night,
+                    (false, false) => &self.inst,
+                };
                 pass.bind(ctx, shadow, &self.lamp);
                 gpu::state_opaque(ctx, if b.kind == kind::OPEN_INST { Cull::None } else { Cull::Cw });
                 let v = Uniforms::vertex(ctx);
                 v.set(pass.vp, vp);
+                v.set(pass.lamp_map, &self.lamp_map);
                 v.set(pass.bx, &[b.origin[0], b.origin[1], b.origin[2], 0.0, b.span[0], b.span[1], b.span[2], 0.0]);
                 let mut l = *look;
                 let r = &placed[at].1.rows;

@@ -266,8 +266,8 @@ struct Settings {
     full: Reach,
 }
 
-/// Seconds a frame may wait for the GPU to finish the frame before last, before the governor draws the levels of
-/// detail in.
+/// Seconds a frame may wait for the GPU to finish the frame before last, per refresh it is paced to, before the
+/// governor draws the levels of detail in.
 const BEHIND: f32 = 0.006;
 
 /// A control message's `press`: a mask of PocketJS button bits, or names.
@@ -437,13 +437,15 @@ fn frame_light(p: &Preset, lamp_unit: f32, eye: V3, ahead: V3) -> (city::Frame, 
         s[0] * k, s[1] * k, s[2] * k, glow,
         g[0] * k, g[1] * k, g[2] * k, p.interior_glow,
         1.0, 0.0, 0.0, 0.0,
-        eye.x, eye.y, eye.z, 0.0,
+        eye.x, eye.y, eye.z, p.road_wetness,
         env[0], env[1], env[2], 0.0,
     ];
     let haze = city::Haze { colors: p.haze, sun: [d[0] / flat, d[2] / flat], eye, ahead, density: p.fog_density, thins: ih };
     let sun = p.light_sun.map(|x| x * k);
-    // [2].x: the lamps' light, as a texel's full value stands for, as far as the lamps are on.
-    let look = [p.tone[0], p.tone[1], p.tone[2], p.tone[3], sun[0], sun[1], sun[2], 0.0, lamp_unit * glow * k, 0.0, 0.0, 0.0];
+    // [2].x: the lamps' light, as a texel's full value stands for, as far as the lamps are on; at 0.55 of the pools
+    // the reference's cobra heads leave, which is where its sidewalks under a lamp show at midnight beside these
+    // (its ground darkens with the wet more than the probe's dry colours do).
+    let look = [p.tone[0], p.tone[1], p.tone[2], p.tone[3], sun[0], sun[1], sun[2], 0.0, lamp_unit * glow * k * 0.55, 0.0, 0.0, 0.0];
     (frame, look, haze, p.interior_glow > 0.3)
 }
 
@@ -547,14 +549,15 @@ fn main() {
         let mut set = Settings {
             profile: false,
             show: Show { reach: Reach { detail: 110.0, near: 260.0, mid: 1400.0, far: 7000.0 }, walls: true, solids: true, instances: true },
-            pace: boot["pace"].as_i64().unwrap_or(1) as i32,
+            // Thirty frames a second: the city takes what a second refresh gives it.
+            pace: boot["pace"].as_i64().unwrap_or(2) as i32,
             interface: true,
             models: true,
             post: true,
             view: None,
-            budget: 200_000,
+            budget: 380_000,
             govern: true,
-            full: Reach { detail: 110.0, near: 260.0, mid: 1400.0, far: 7000.0 },
+            full: Reach { detail: 160.0, near: 420.0, mid: 2400.0, far: 7000.0 },
         };
         let mut scale = 1.0f32;
         let mut hold = 0u32;
@@ -650,9 +653,12 @@ fn main() {
             // This slot's vertices were last used two frames ago: the GPU must be done with them.
             fence.wait(slot);
             let waited = t2.elapsed();
-            // By night, what is bright in the frame on display glows over this one.
-            let glow_gain = frame[7] * 0.6;
-            if let Err(e) = if set.post { glow.run(ctx, glow_gain, 0.72, g::vita2d_get_current_fb(), 960) } else { Ok(()) } {
+            // What is bright in the frame on display glows over this one, as the reference's bloom does for the hour:
+            // its strength, and its threshold where the display shows it (a little under: the chain sees the display's
+            // compressed highlights).
+            let glow_gain = preset.bloom[0] * 3.0;
+            let glow_threshold = (preset.bloom[1] - 0.12).clamp(0.55, 0.9);
+            if let Err(e) = if set.post { glow.run(ctx, glow_gain, glow_threshold, g::vita2d_get_current_fb(), 960) } else { Ok(()) } {
                 pocketjs_vita::vita_log(format_args!("newyork: {e}"));
             }
             g::vita2d_pool_reset();
@@ -721,7 +727,7 @@ fn main() {
                 }
             }
             if set.models {
-                stats.tris[2] += city.draw_models(ctx, &vp, &frame, &look, &haze, shadows.texture(), &mut placed);
+                stats.tris[2] += city.draw_models(ctx, &vp, &frame, &look, &haze, night, shadows.texture(), &mut placed);
             }
             if set.post {
                 glow.add(ctx, glow_gain);
@@ -746,9 +752,9 @@ fn main() {
             // room; they also come in when this frame had to wait for the GPU, and stay in for two seconds after.
             if set.govern {
                 let drawn = stats.tris[0] + stats.tris[1] + stats.tris[2];
-                let behind = !set.profile && waited.as_secs_f32() > BEHIND;
+                let behind = !set.profile && waited.as_secs_f32() > BEHIND * set.pace as f32;
                 if behind {
-                    hold = 120;
+                    hold = (120 / set.pace) as u32;
                 }
                 if drawn > set.budget {
                     scale *= 0.97;
@@ -771,7 +777,7 @@ fn main() {
             let shown = refreshes(sceDisplayGetVcount(), last_vcount);
             timing.push((now - last).as_secs_f32() * 1000.0, shown > set.pace);
             if shown > set.pace {
-                if worked.as_secs_f32() > 0.012 {
+                if worked.as_secs_f32() > 0.012 * set.pace as f32 {
                     late_cpu += 1;
                 } else {
                     late_gpu += 1;

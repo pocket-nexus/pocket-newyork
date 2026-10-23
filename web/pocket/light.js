@@ -10,6 +10,8 @@
 //   sun, across from it and away from it, graded and tone-mapped likewise.
 // - The tone: per hour, the grade and ACES of a grey to the display's value, fitted as y = x(ax + b) / (x(cx + d) + 1)
 //   (within 0.013 of it from 0.0003 to 40).
+// - The bloom: the reference's strength for the hour, and its threshold (exposed linear light) as the display shows
+//   it.
 // - The environment: the sky's linear radiance a surface reflects (the scene's environment is the same sky, at its
 //   environmentIntensity), around the horizon just over it and a third of the way up.
 
@@ -336,6 +338,7 @@ export async function readLight(app) {
       fogHeight: lighting.uFogHeight?.value ?? 900,
       tone,
       env: { horizon: ring(0.05), up: ring(0.5) },
+      bloom: { strength: look.bloom, threshold: display([look.threshold / look.exposure, look.threshold / look.exposure, look.threshold / look.exposure], { ...look, balance: [1, 1, 1] })[1] },
       sky: `sky/${id}.png`
     };
     log(`light ${id}: sky ${light.sky.map((x) => x.toFixed(3))} ground ${light.ground.map((x) => x.toFixed(3))} sun ${light.sun.map((x) => x.toFixed(3))} (residual ${light.residual.toFixed(4)}); tone ${tone.map((x) => x.toFixed(4))} (worst ${worst.toFixed(4)})`);

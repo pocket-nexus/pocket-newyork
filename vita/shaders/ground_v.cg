@@ -18,6 +18,9 @@ void main(
     out float oHeight : TEXCOORD2,
     out float2 oLamp : TEXCOORD3,
     out half4 oSpec : TEXCOORD4,
+#ifdef NIGHT
+    out float3 oMirror : TEXCOORD5,
+#endif
     out float4 oLight : COLOR0,
     out float4 oTint : COLOR1)
 {
@@ -28,6 +31,18 @@ void main(
     oHeight = world.y;
     oLamp = world.xz * uLampMap.xz + uLampMap.yw;
     oLight = float4(hemi(aNormal, uFrame) * aAo, max(dot(aNormal, uFrame[0].xyz), 0.0));
-    oTint = float4(aTint.rgb * 2.0, haze_of(world, oPosition.w, uFrame));
+    // Wet ground is darker (the reference's surfaces darken with uRoadWetness; their colours here were probed dry).
+    oTint = float4(aTint.rgb * (2.0 - 0.6 * uFrame[4].w), haze_of(world, oPosition.w, uFrame));
     oSpec = reflection(world, aNormal, uGloss.xy, uFrame);
+#ifdef NIGHT
+    // The lamp a point mirrors stands on the eye's line through it, as far again as a lamp's height (8 m) is to the
+    // eye's height over the point; it shows by Schlick's Fresnel, as wet and as smooth as the surface is.
+    float3 to = uFrame[4].xyz - world;
+    float above = max(to.y, 0.5);
+    float2 lamp = world.xz - to.xz * (8.0 / above);
+    float k = 1.0 - saturate(to.y * rsqrt(dot(to, to)));
+    float k2 = k * k;
+    float smooth = saturate(1.0 - uGloss.x);
+    oMirror = float3(lamp * uLampMap.xz + uLampMap.yw, uFrame[4].w * smooth * smooth * k2 * k2 * k);
+#endif
 }

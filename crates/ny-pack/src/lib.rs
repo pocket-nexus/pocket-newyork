@@ -31,7 +31,7 @@
 //! | `PRST` | `Preset` table: the hours the reference offers |
 //! | `SKYP` | `SkyHead`, then per hour (`PRST` order) its sky's panorama, `w × h` RGBA8 texels row by row: longitude from +x towards +z along a row, latitude from straight up to straight down down the rows, as the display shows it |
 //! | `HMAP` | `Heights`, then `u16` per cell of its grid, row by row from the north-west: the top of whatever stands there, in `Heights::unit` metres |
-//! | `LAMP` | `Heights` (its `unit`: the light a value of 31 in a channel stands for), then `u16` per cell, `r << 11 \| g << 5 \| b`: the light the street lamps leave on the ground by night |
+//! | `LAMP` | `Heights` (its `unit`: the light a full channel stands for), then `u16` per cell, `r << 11 \| g << 5 \| b`, each channel the square root of its share of `unit`: the light the street lamps leave on the ground by night at the reference's full lamp scale |
 //! | `MODL` | `Model` table: what moves (traffic, the player's vehicles), each a range of instanced batches of `BTCH` |
 
 #![cfg_attr(not(feature = "std"), no_std)]
@@ -45,7 +45,7 @@ use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
 pub const MAGIC: u32 = u32::from_le_bytes(*b"NYPK");
-pub const VERSION: u32 = 12;
+pub const VERSION: u32 = 13;
 
 pub const fn tag(t: &[u8; 4]) -> u32 {
     u32::from_le_bytes(*t)
@@ -360,6 +360,11 @@ pub struct Preset {
     /// just over the horizon, and a third of the way up.
     pub env_horizon: [f32; 3],
     pub env_up: [f32; 3],
+    /// The reference's bloom for the hour: its strength, and its threshold as the display shows it.
+    pub bloom: [f32; 2],
+    /// How wet the roadway is (`uRoadWetness`).
+    pub road_wetness: f32,
+    pub pad2: f32,
 }
 
 /// The head of `SKYP`.
