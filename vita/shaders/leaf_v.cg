@@ -1,0 +1,36 @@
+// Trees: a crown of cards drawn at each tree, under the leaves' picture, tinted by the tree.
+
+void main(
+    float3 aPosition,
+    float3 aNormal,
+    float aAo,
+    float2 aUv,
+    float4 aBark,
+    float4 aRow0,
+    float4 aRow1,
+    float4 aRow2,
+    float4 aTint,
+    uniform float4x4 uVp,
+    uniform float4 uBox[2],
+    uniform float4 uFrame[4],
+    out float4 oPosition : POSITION,
+    out float2 oUv : TEXCOORD0,
+    out float2 oMap : TEXCOORD1,
+    out float oHeight : TEXCOORD2,
+    out float4 oLight : COLOR0,
+    out float4 oColor : COLOR1,
+    out float4 oBark : COLOR2)
+{
+    float4 local = float4(aPosition * uBox[1].xyz + uBox[0].xyz, 1.0);
+    float3 world = float3(dot(aRow0, local), dot(aRow1, local), dot(aRow2, local));
+    oPosition = mul(uVp, float4(world, 1.0));
+    float3 n = normalize(float3(dot(aRow0.xyz, aNormal), dot(aRow1.xyz, aNormal), dot(aRow2.xyz, aNormal)));
+    oUv = aUv * UV_RANGE;
+    oMap = shadow_map(world, n, uFrame);
+    oHeight = world.y;
+    // Cards light from the side that faces the sun, as thin things do; deep in the crown, less.
+    oLight = float4(hemi(n, uFrame) * aAo, (abs(dot(n, uFrame[0].xyz)) * 0.7 + 0.3) * aAo);
+    // A card takes the tree's tint over the picture; bark keeps its colour (alpha: which it is).
+    oColor = float4(lerp(aBark.rgb, aTint.rgb * 2.0, aBark.a), haze_of(oPosition.w, uFrame));
+    oBark = float4(0.0, 0.0, 0.0, aBark.a);
+}

@@ -47,6 +47,8 @@ enum Class {
     Solid,
     /// Facade boxes: walls under the baked pages, roofs by their probed vertices.
     Facade,
+    /// Trees: their crowns of cards, as the reference draws them past 420 m (`lod2`), under the baked leaves.
+    Tree,
 }
 
 fn classify(ir: &Ir, o: &Object, facades: &facade::Facades) -> Class {
@@ -62,11 +64,11 @@ fn classify(ir: &Ir, o: &Object, facades: &facade::Facades) -> Class {
         return Class::Skip; // the sky dome
     }
     match m.factory.as_deref() {
-        Some("createTreeMaterial") => return Class::Skip,
+        Some("createTreeMaterial") => return if o.name.ends_with("_lod2") { Class::Tree } else { Class::Skip },
         Some("createParkLampPoolMaterial" | "createContactShadowMaterial" | "createGodRayMaterial" | "createTunnelShadeMaterial" | "createSteamMaterial" | "createCarFlareMaterial") => return Class::Skip,
         _ => {}
     }
-    if !o.shown {
+    if !o.shown && m.factory.as_deref() != Some("createTreeMaterial") {
         return Class::Skip;
     }
     if m.transparent && m.factory.as_deref() != Some("createRoadPaintMaterial") {
@@ -182,6 +184,7 @@ fn main() {
     let facades = facade::load(&ir_dir, &mut textures).unwrap_or_else(|e| panic!("{e}"));
     eprintln!("facades: {} styles, {} pictures", facades.styles.len(), textures.entries.len());
     let grounds = ground_swatches(&ir_dir, &mut textures);
+    let leaves = leaves_picture(&ir_dir, &mut textures);
     eprintln!("ground: {} pictures", grounds.len());
     let classes: Vec<Class> = ir.objects.iter().map(|o| classify(&ir, o, &facades)).collect();
     let mut sources: HashMap<usize, Source> = HashMap::new();
@@ -256,6 +259,7 @@ fn main() {
     let mut shapes: HashMap<(usize, usize, usize), (u32, [f32; 3])> = HashMap::new();
     let mut means: HashMap<(usize, usize, usize), [f32; 3]> = HashMap::new();
     let mut inst_colors: HashMap<usize, Vec<f32>> = HashMap::new();
+    let mut tree_shapes: HashMap<usize, u32> = HashMap::new();
     // Triangles by level and by what they come from, for the receipt.
     let mut spend: HashMap<(usize, String), usize> = HashMap::new();
     for (oid, i, m, b) in &placed {
@@ -285,6 +289,12 @@ fn main() {
                     heights.triangle(p(0), p(1), p(2));
                 }
             }
+        }
+        if class == Class::Tree {
+            if let Some(tex) = leaves {
+                tree_instance(&ir, o, *i, m, b, src, probe, tex, &mut bins, &mut tree_shapes, &mut attrs_cache);
+            }
+            continue;
         }
         if class == Class::Facade {
             facade_instance(&ir, o, *i, m, b, &facades, &textures, probe, &mut bins, &profile, &mut attrs_cache, &mut spend);
@@ -632,4 +642,53 @@ fn to_tint(verts: &mut [Vx], mean: [f32; 3]) {
         }
         v.a[3] = 255;
     }
+}
+
+/// The leaves' picture the export baked (`bake.json` `leaves`).
+fn leaves_picture(ir: &std::path::Path, textures: &mut tex::Textures) -> Option<u32> {
+    let text = std::fs::read_to_string(ir.join("bake.json")).ok()?;
+    let bake: serde_json::Value = serde_json::from_str(&text).ok()?;
+    let file = bake["leaves"]["file"].as_str()?;
+    Some(textures.add_png(&ir.join(file), 0.0).unwrap_or_else(|e| panic!("{e}")))
+}
+
+/// One tree: an instance of its species' crown in its cell's near level, tinted as the tree is (`aTreeData`).
+#[allow(clippy::too_many_arguments)]
+fn tree_instance(ir: &Ir, o: &Object, i: usize, m: &M4, b: &Aabb, src: &Source, probe: Option<&ir::Probe>, leaves: u32, bins: &mut Bins, shapes: &mut HashMap<usize, u32>, cache: &mut HashMap<(usize, String), Vec<f32>>) {
+    let g = &ir.geometries[o.geometry];
+    let shape = *shapes.entry(o.id).or_insert_with(|| {
+        let uv = ir.attribute(g, "uv");
+        let tree = ir.attribute(g, "aTree");
+        // The cards as the reference made them: simplifying would tear them from their pictures.
+        let tris = ir.triangles(g);
+        let mut verts = Vec::with_capacity(src.pos.len());
+        for vi in 0..src.pos.len() {
+            let (u, v) = uv.as_ref().map(|(a, s)| (a[vi * s], a[vi * s + 1])).unwrap_or((0.0, 0.0));
+            let (leaf, crown) = tree.as_ref().map(|(a, s)| (a[vi * s], a[vi * s + 1])).unwrap_or((1.0, 1.0));
+            let is_leaf = leaf > 0.5;
+            // The bark's colour is the probe's; a card's comes from the leaves' picture.
+            let bark = probe.map(|p| p.albedo(0, vi)).unwrap_or([90, 75, 60, 255]);
+            let ao = if is_leaf { crown * 0.45 + 0.55 } else { crown * 0.4 + 0.6 };
+            verts.push(Vx {
+                p: src.pos[vi],
+                n: geom::normalize(src.nrm[vi]).map(geom::snorm8),
+                ao: (ao.clamp(0.0, 1.0) * 255.0) as u8,
+                a: if is_leaf { [255, 255, 255, 255] } else { [bark[0], bark[1], bark[2], 0] },
+                b: [0; 4],
+                // (the picture's rows run from v = 1 down)
+                uv: [u, 1.0 - v],
+            });
+        }
+        let idx: Vec<u32> = tris.iter().flat_map(|(_, t)| t.iter().copied()).collect();
+        bins.shape_of(pack::kind::WALL, leaves, &verts, &idx)
+    });
+    let inst = o.instances.as_ref().unwrap();
+    let data = cache.entry((o.id, "aTreeData".into())).or_insert_with(|| {
+        let a = &inst.attrs["aTreeData"];
+        ir.floats(&a.array, a.normalized)
+    });
+    let tint = [0, 1, 2].map(|k| (geom::srgb(data[i * 4 + k]) as f32 / 255.0 * 128.0).round().clamp(0.0, 255.0) as u8);
+    let rows = [[m[0], m[4], m[8], m[12]], [m[1], m[5], m[9], m[13]], [m[2], m[6], m[10], m[14]]];
+    let place = bins.place(NEAR, b.center());
+    bins.instance(NEAR, place, pack::kind::LEAF_INST, shape, pack::Instance { rows, tint: [tint[0], tint[1], tint[2], 255] }, b);
 }

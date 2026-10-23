@@ -43,7 +43,7 @@ use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
 pub const MAGIC: u32 = u32::from_le_bytes(*b"NYPK");
-pub const VERSION: u32 = 7;
+pub const VERSION: u32 = 8;
 
 pub const fn tag(t: &[u8; 4]) -> u32 {
     u32::from_le_bytes(*t)
@@ -122,10 +122,14 @@ pub mod kind {
     pub const SOLID_INST: u32 = 4;
     /// As `SOLID_INST`, seen from both sides.
     pub const OPEN_INST: u32 = 5;
-    pub const COUNT: usize = 6;
+    /// Trees: a crown of cards drawn at every `Instance`, `WallVertex` in the tree's own frame: `uv` in the
+    /// leaves' picture (`tex`), `tint` the bark's colour with alpha 255 on a leaf card. Seen from both sides; a
+    /// card is cut where the picture's alpha is under a half.
+    pub const LEAF_INST: u32 = 6;
+    pub const COUNT: usize = 7;
 
     pub fn instanced(kind: u32) -> bool {
-        kind == SOLID_INST || kind == OPEN_INST
+        kind == SOLID_INST || kind == OPEN_INST || kind == LEAF_INST
     }
 }
 

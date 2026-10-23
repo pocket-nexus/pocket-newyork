@@ -229,8 +229,61 @@ export async function bakeGround(app) {
   return records;
 }
 
+/**
+ * Leaves: the trees' leaf atlas (createLeafAtlas, a picture of coverage, brightness and twigs) drawn through the tree
+ * material's own colour graph, as a leaf with a white tint deep in no crown would be: what each card shows, by its
+ * texture coordinates. A device multiplies it by a tree's tint and cuts the card where its alpha is under a half.
+ */
+export async function bakeLeaves(app) {
+  const { renderer, scene: city, lighting } = app;
+  let tree = null;
+  city.traverse((o) => {
+    if (!tree && o.material?.userData?.pocket?.factory === 'createTreeMaterial') tree = o.material;
+  });
+  if (!tree) return null;
+  lighting.applyPreset('midday', true);
+  const S = 1024;
+  const quad = new THREE.PlaneGeometry(1, 1);
+  quad.translate(0.5, 0.5, 0);
+  const n = quad.attributes.position.count;
+  quad.setAttribute('aTree', new THREE.BufferAttribute(new Float32Array(n * 4).map((_, i) => (i % 4 < 2 ? 1 : 0)), 4));
+  quad.setAttribute('aTreeData', new THREE.BufferAttribute(new Float32Array(n * 4).map((_, i) => (i % 4 < 3 ? 1 : 1.5)), 4));
+  const bm = new THREE.MeshBasicNodeMaterial();
+  bm.fog = false;
+  // (transparent, so the graph's alpha is what the target receives; nothing under it to blend with)
+  bm.transparent = true;
+  bm.blending = THREE.NoBlending;
+  bm.colorNode = tree.colorNode;
+  const scene = new THREE.Scene();
+  scene.add(new THREE.Mesh(quad, bm));
+  const cam = new THREE.OrthographicCamera(0, 1, 1, 0, 0.1, 10);
+  cam.position.set(0, 0, 5);
+  cam.updateMatrixWorld();
+  const target = new THREE.RenderTarget(S, S, { type: THREE.FloatType, depthBuffer: false });
+  renderer.setRenderTarget(target);
+  renderer.setClearColor(0x000000, 0);
+  renderer.clear();
+  renderer.render(scene, cam);
+  renderer.setRenderTarget(null);
+  const px = await renderer.readRenderTargetPixelsAsync(target, 0, 0, S, S);
+  target.dispose();
+  // Rows top first: the top row is the atlas's v = 1.
+  const out = new Uint8ClampedArray(S * S * 4);
+  const srgb = (x) => Math.round((x <= 0.0031308 ? x * 12.92 : 1.055 * Math.pow(Math.min(1, Math.max(0, x)), 1 / 2.4) - 0.055) * 255);
+  for (let i = 0; i < S * S; i++) {
+    for (let c = 0; c < 3; c++) out[i * 4 + c] = srgb(px[i * 4 + c]);
+    out[i * 4 + 3] = Math.round(Math.min(1, Math.max(0, px[i * 4 + 3])) * 255);
+  }
+  await put('bake/leaves.png', await png(out, S, S));
+  bm.dispose();
+  lighting.applyPreset('golden', true);
+  log('bake: the leaves');
+  return { file: 'bake/leaves.png', flipV: true };
+}
+
 export async function bake(app) {
   const facades = await bakeFacades(app);
   const ground = await bakeGround(app);
-  await put('bake.json', JSON.stringify({ facades, ground }, null, 1));
+  const leaves = await bakeLeaves(app);
+  await put('bake.json', JSON.stringify({ facades, ground, leaves }, null, 1));
 }

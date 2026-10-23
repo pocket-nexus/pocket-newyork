@@ -25,6 +25,8 @@ const SOLID_V: &str = include_str!("../shaders/solid_v.cg");
 const SOLID_F: &str = include_str!("../shaders/solid_f.cg");
 const INST_V: &str = include_str!("../shaders/inst_v.cg");
 const GROUND_V: &str = include_str!("../shaders/ground_v.cg");
+const LEAF_V: &str = include_str!("../shaders/leaf_v.cg");
+const LEAF_F: &str = include_str!("../shaders/leaf_f.cg");
 const GROUND_F: &str = include_str!("../shaders/ground_f.cg");
 
 /// Light reaches the fragments as a colour, which holds 0..1: it is carried divided by this.
@@ -175,6 +177,7 @@ pub struct CityGpu {
     inst: Pass,
     inst_open: Pass,
     ground: Pass,
+    leaf: Pass,
     items: Vec<Item>,
     wanted: Vec<(u32, f32)>,
     pub models: Vec<Model>,
@@ -201,6 +204,7 @@ const SHADOW_OUT: f32 = 2.5;
 
 const WALL_ATTRS: [(&str, u16, u32, u8); 5] = [("aPosition", 0, U16N, 3), ("aNormal", 6, S8N, 3), ("aAo", 9, U8N, 1), ("aUv", 10, S16N, 2), ("aTint", 14, U8N, 4)];
 const SOLID_ATTRS: [(&str, u16, u32, u8); 5] = [("aPosition", 0, U16N, 3), ("aNormal", 6, S8N, 3), ("aAo", 9, U8N, 1), ("aColor", 10, U8N, 4), ("aGlow", 14, U8N, 4)];
+const LEAF_ATTRS: [(&str, u16, u32, u8); 5] = [("aPosition", 0, U16N, 3), ("aNormal", 6, S8N, 3), ("aAo", 9, U8N, 1), ("aUv", 10, S16N, 2), ("aBark", 14, U8N, 4)];
 const GROUND_ATTRS: [(&str, u16, u32, u8); 4] = [("aPosition", 0, U16N, 3), ("aNormal", 6, S8N, 3), ("aAo", 9, U8N, 1), ("aTint", 10, U8N, 4)];
 const INST_ATTRS: [(&str, u16, u32, u8); 4] = [("aRow0", 0, F32, 4), ("aRow1", 16, F32, 4), ("aRow2", 32, F32, 4), ("aTint", 48, U8N, 4)];
 
@@ -230,6 +234,8 @@ impl CityGpu {
         let open = Pass::new(gpu.program("open", &format!("{defines}#define OPEN\n"), SOLID_V, SOLID_F, &solid_stream, msaa, opaque)?, ["", ""]);
         let inst = Pass::new(gpu.program("inst", &defines, INST_V, SOLID_F, &inst_streams, msaa, opaque)?, ["", ""]);
         let inst_open = Pass::new(gpu.program("inst_open", &format!("{defines}#define OPEN\n"), INST_V, SOLID_F, &inst_streams, msaa, opaque)?, ["", ""]);
+        let leaf_streams = [Stream { stride: 20, instanced: false, attrs: &LEAF_ATTRS }, Stream { stride: 52, instanced: true, attrs: &INST_ATTRS }];
+        let leaf = Pass::new(gpu.program("leaf", &defines, LEAF_V, LEAF_F, &leaf_streams, msaa, opaque)?, ["uLeaves", ""]);
         let ground = Pass::new(gpu.program("ground", &defines, GROUND_V, GROUND_F, &[Stream { stride: 16, instanced: false, attrs: &GROUND_ATTRS }], msaa, opaque)?, ["uGround", ""]);
 
         progress("Reading the city's geometry");
@@ -301,6 +307,7 @@ impl CityGpu {
             inst,
             inst_open,
             ground,
+            leaf,
             items: Vec::with_capacity(4096),
             wanted: Vec::with_capacity(256),
             models,
@@ -344,7 +351,7 @@ impl CityGpu {
             let on = match b.kind {
                 kind::WALL => show.walls,
                 kind::SOLID | kind::OPEN => show.solids,
-                kind::SOLID_INST | kind::OPEN_INST => show.instances,
+                kind::SOLID_INST | kind::OPEN_INST | kind::LEAF_INST => show.instances,
                 kind::GROUND => show.solids,
                 _ => false,
             };
@@ -371,12 +378,19 @@ impl CityGpu {
                 kind::OPEN => &self.open,
                 kind::SOLID_INST => &self.inst,
                 kind::GROUND => &self.ground,
+                kind::LEAF_INST => &self.leaf,
                 _ => &self.inst_open,
             };
             if current.map(|c| c.0) != Some(b.kind) {
                 pass.bind(ctx, shadow);
-                gpu::state_opaque(ctx, if b.kind == kind::OPEN || b.kind == kind::OPEN_INST { Cull::None } else { Cull::Cw });
+                gpu::state_opaque(ctx, if matches!(b.kind, kind::OPEN | kind::OPEN_INST | kind::LEAF_INST) { Cull::None } else { Cull::Cw });
                 current = Some((b.kind, NO_TEX));
+            }
+            if b.kind == kind::LEAF_INST && current.map(|c| c.1) != Some(b.tex) {
+                if let Some(Some(t)) = self.textures.get(b.tex as usize) {
+                    g::sceGxmSetFragmentTexture(ctx, pass.units[0], &t.gxm);
+                }
+                current = Some((b.kind, b.tex));
             }
             if b.kind == kind::GROUND && current.map(|c| c.1) != Some(b.tex) {
                 if let Some(Some(t)) = self.textures.get(b.tex as usize) {
@@ -412,7 +426,8 @@ impl CityGpu {
             if kind::instanced(b.kind) {
                 v.set(pass.vp, vp);
                 v.set(pass.bx, &[b.origin[0], b.origin[1], b.origin[2], 0.0, b.span[0], b.span[1], b.span[2], 0.0]);
-                g::sceGxmSetVertexStream(ctx, 0, self.own.solids.add(b.vtx_first as usize * 20).cast());
+                let shapes = if b.kind == kind::LEAF_INST { self.own.walls } else { self.own.solids };
+                g::sceGxmSetVertexStream(ctx, 0, shapes.add(b.vtx_first as usize * 20).cast());
                 g::sceGxmSetVertexStream(ctx, 1, instances.add((b.inst_first + it.from) as usize * 52).cast());
                 let n = it.to - it.from;
                 g::sceGxmDrawInstanced(ctx, g::SceGxmPrimitiveType_SCE_GXM_PRIMITIVE_TRIANGLES, g::SceGxmIndexFormat_SCE_GXM_INDEX_FORMAT_U16, self.own.indices.add(b.idx_first as usize).cast(), b.idx_count * n, b.idx_count);

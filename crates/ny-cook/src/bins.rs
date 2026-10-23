@@ -45,9 +45,12 @@ impl Bin {
 /// Level of detail, place (cell, block or region index), program, picture (or shape, for instances).
 pub type Key = (u8, u32, u32, u32);
 
-/// A shape drawn at many places: its vertices in its own frame, written once.
+/// A shape drawn at many places: its vertices in its own frame, written once, as `kind`'s vertices (`SOLID`, or
+/// `WALL` for a tree's cards) with `tex`.
 pub struct Shape {
     pub bin: Bin,
+    pub kind: u32,
+    pub tex: u32,
 }
 
 /// The instances of one shape in one place, each with its sub.
@@ -102,9 +105,13 @@ impl Bins {
     }
 
     pub fn shape(&mut self, verts: &[Vx], idx: &[u32]) -> u32 {
+        self.shape_of(pack::kind::SOLID, pack::NO_TEX, verts, idx)
+    }
+
+    pub fn shape_of(&mut self, kind: u32, tex: u32, verts: &[Vx], idx: &[u32]) -> u32 {
         let mut bin = Bin::default();
         bin.add(verts, idx, 0);
-        self.shapes.push(Shape { bin });
+        self.shapes.push(Shape { bin, kind, tex });
         self.shapes.len() as u32 - 1
     }
 
@@ -268,7 +275,7 @@ impl Written {
         let mut shape_batch: Vec<Batch> = Vec::with_capacity(bins.shapes.len());
         for s in &bins.shapes {
             let before = w.batches.len();
-            w.put(None, pack::kind::SOLID, pack::NO_TEX, &s.bin, 0);
+            w.put(None, s.kind, s.tex, &s.bin, 0);
             assert_eq!(w.batches.len(), before + 1, "a shape must fit one batch");
             shape_batch.push(w.batches.pop().unwrap());
         }
