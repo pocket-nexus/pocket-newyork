@@ -4,7 +4,8 @@
   "license": "MIT",
   "type": "module",
   "scripts": {
-    "newyork": "bun tools/newyork.ts"
+    "newyork": "bun tools/newyork.ts",
+    "ui": "bun tools/ui.ts"
   },
   "devDependencies": {
     "@types/bun": "^1.4.2",

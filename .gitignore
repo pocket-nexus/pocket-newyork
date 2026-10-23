@@ -4,3 +4,6 @@ dist/
 node_modules/
 target/
 web/vendor/three/
+ui/app/generated/
+ui/.pocket/
+ui/app/images.json

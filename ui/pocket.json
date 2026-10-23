@@ -1,0 +1,32 @@
+{
+  "$schema": "https://pocketjs.dev/schema/pocket-2.json",
+  "pocket": 2,
+  "id": "dev.pocket-nexus.newyork",
+  "name": "pocket-newyork",
+  "title": "Pocket New York",
+  "version": "0.1.0",
+  "engine": {
+    "capabilities": {
+      "requires": [
+        "text.glyphs.baked"
+      ],
+      "enhances": [
+        "input.buttons",
+        "input.touch",
+        "input.analog.left"
+      ]
+    }
+  },
+  "app": {
+    "entry": "app/main.tsx",
+    "output": "newyork",
+    "framework": "solid",
+    "viewport": {
+      "logical": [
+        480,
+        272
+      ],
+      "presentation": "integer-fit"
+    }
+  }
+}
