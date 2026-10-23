@@ -1,0 +1,20 @@
+[package]
+name = "ny-interface"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "The renderer's side of Pocket New York's interface: the protocol of ui/, the flow around play, and the channel a PocketJS guest opens in the process"
+
+[features]
+default = ["std"]
+# Without `std` the crate needs only `core`, `alloc` and `libm` (the device builds).
+std = ["ny-sim/std"]
+# The guest's service ops answered through the QuickJS API (the Vita, whose host is Rust).
+guest = ["dep:libquickjs-sys"]
+# The same ops as the C symbols PocketJS's C hosts call (the 3DS, the iPod touch).
+wire = []
+
+[dependencies]
+ny-sim = { path = "../ny-sim", default-features = false }
+libm = "0.2"
+libquickjs-sys = { git = "https://github.com/pocket-nexus/quickjs-rs.git", rev = "ba5bdd0dc013518768e76cd9e05cd30ed53dd35b", optional = true }

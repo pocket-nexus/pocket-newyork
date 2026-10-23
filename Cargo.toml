@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/ny-pack", "crates/ny-sim", "crates/ny-view", "crates/ny-cook"]
+members = ["crates/ny-pack", "crates/ny-sim", "crates/ny-view", "crates/ny-cook", "crates/ny-interface"]
 # The device apps build with their own toolchains and lockfiles.
 exclude = ["vita", "vendor", "web"]
 

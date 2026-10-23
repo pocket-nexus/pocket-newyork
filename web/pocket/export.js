@@ -147,6 +147,7 @@ async function main() {
   if (ONLY === 'survey') await survey(app);
   if (!ONLY || ONLY === 'world') await exportWorld(app);
   if (!ONLY || ONLY === 'bake') await bake(app);
+  if (!ONLY || ONLY === 'map') await (await import('./map.js')).exportMap(app);
   if (!ONLY || ONLY === 'scene' || ONLY === 'probe') {
     const exported = await exportScene(app, ONLY !== 'probe');
     if (!ONLY || ONLY === 'probe') await probe(app, exported);
