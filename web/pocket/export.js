@@ -18,6 +18,7 @@ import { describeMaterial, log, put } from './util.js';
 import { exportScene } from './scene.js';
 import { probe } from './probe.js';
 import { exportWorld } from './world.js';
+import { exportSim } from './sim.js';
 
 const params = new URLSearchParams(location.search);
 const ONLY = params.get('only');
@@ -145,6 +146,7 @@ async function main() {
   window.__POCKET_EXPORT = app;
   if (ONLY === 'survey') await survey(app);
   if (!ONLY || ONLY === 'world') await exportWorld(app);
+  if (!ONLY || ONLY === 'sim') await exportSim(app);
   if (!ONLY || ONLY === 'scene' || ONLY === 'probe') {
     const exported = await exportScene(app, ONLY !== 'probe');
     if (!ONLY || ONLY === 'probe') await probe(app, exported);

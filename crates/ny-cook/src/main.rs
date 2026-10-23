@@ -5,6 +5,7 @@
 mod bins;
 mod geom;
 mod ir;
+mod sim;
 
 use bins::{Bin, Bins, Vx, FAR, MID, NEAR};
 use geom::{Aabb, M4};
@@ -288,6 +289,7 @@ fn main() {
     pw.add(pack::VSOL, pack::slice_bytes(&w.solids).to_vec());
     pw.add(pack::VGND, pack::slice_bytes(&w.grounds).to_vec());
     pw.add(pack::IDX0, pack::slice_bytes(&w.indices).to_vec());
+    sim::add(&mut pw, &ir_dir).unwrap_or_else(|e| panic!("{e}"));
     let bytes = pw.finish();
     std::fs::create_dir_all(out.parent().unwrap()).unwrap();
     std::fs::write(&out, &bytes).unwrap();
