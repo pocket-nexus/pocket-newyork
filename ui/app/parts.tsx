@@ -161,6 +161,11 @@ export function Gauge(props: { host: Host; width: number }) {
       <View class="relative flex-row items-end" style={{ width: inner(), height: 30 }}>
         <Text ref={digits} class="text-2xl font-bold" style={{ width: 44, height: 30, textColor: INK }}>0</Text>
         <Text class="text-xs font-bold tracking-wide" style={{ marginB: 4, textColor: FAINT }}>MPH</Text>
+        {/* The height stands at the right of the speed, in a cell of fixed size, while the player flies. */}
+        <View class="absolute flex-row items-end" style={{ insetR: 0, insetB: 4, opacity: flying() ? 1 : 0 }}>
+          <Text ref={altitude} class="text-xs font-bold" style={{ width: 28, height: 14, textColor: INK }}>0</Text>
+          <Text class="text-xs font-bold tracking-wide" style={{ textColor: FAINT }}>FT</Text>
+        </View>
       </View>
       <View class="relative rounded" style={{ width: inner(), height: 4, marginT: 3, bgColor: "#ffffff1a" }}>
         <View ref={fill} class="absolute rounded" style={{ insetL: 0, insetT: 0, width: inner(), height: 4, originX: -0.5, scaleX: 0, bgColor: INK }} />
@@ -169,12 +174,6 @@ export function Gauge(props: { host: Host; width: number }) {
       <View class="relative flex-row items-center gap-1" style={{ width: inner(), height: 14, marginT: 5 }}>
         <Text class="text-xs font-bold tracking-wide" style={{ textColor: FAINT }}>CAMERA</Text>
         <Text class="text-xs" style={{ textColor: DIM }}>{CAMERAS[host.camera()]?.short ?? ""}</Text>
-        {/* The height stands at the right, in a cell of fixed size, while the player flies. */}
-        <View class="absolute flex-row items-center" style={{ insetR: 0, insetT: 0, opacity: flying() ? 1 : 0 }}>
-          <Text class="text-xs font-bold tracking-wide" style={{ textColor: FAINT }}>ALT </Text>
-          <Text ref={altitude} class="text-xs font-bold" style={{ width: 30, height: 14, textColor: INK }}>0</Text>
-          <Text class="text-xs font-bold tracking-wide" style={{ textColor: FAINT }}>FT</Text>
-        </View>
       </View>
     </View>
   );
