@@ -565,7 +565,7 @@ fn main() {
         eprintln!("skyline: {} boxes, {tops} triangles of tops, {walls} of walls", sky_boxes.len());
         *spend.entry((2, "skyline".into())).or_default() += tops + walls;
     }
-    let model_parts = models::shapes(&ir_dir, &mut bins).unwrap_or_else(|e| panic!("{e}"));
+    let model_parts = models::shapes(&ir_dir, &mut bins, &mut textures).unwrap_or_else(|e| panic!("{e}"));
     let tris = bins.triangles();
     eprintln!("triangles: near {} mid {} far {} detail {}", tris[0], tris[1], tris[2], tris[3]);
     let mut spent: Vec<_> = spend.into_iter().collect();

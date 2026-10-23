@@ -1,6 +1,7 @@
 uniform sampler2D uGround;
 uniform sampler2D uShadow;
 uniform sampler2D uLamp;
+uniform sampler2D uAround;
 // See frame.cg
 uniform float4 uLook[3];
 
@@ -14,8 +15,7 @@ half4 main(float2 vUv : TEXCOORD0, float2 vMap : TEXCOORD1, float vHeight : TEXC
     half3 light = vLight.rgb + (half3)uLook[1].rgb * (vLight.a * lit);
 #ifdef NIGHT
     // The lamps' pools on the ground.
-    half3 l = (half3)tex2D(uLamp, vLamp).rgb;
-    light += l * l * (half)uLook[2].x;
+    light += lamps((half3)tex2D(uLamp, vLamp).rgb, (half3)tex2D(uAround, vLamp).rgb, 1.0, uLook);
 #endif
     half3 a = (half3)tex2D(uGround, vUv).rgb * vTint.rgb;
     half3 c = a * a * light * ((half)LIGHT_SCALE * vSpec.a) + vSpec.rgb;

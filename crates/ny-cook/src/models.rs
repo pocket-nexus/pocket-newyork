@@ -1,11 +1,13 @@
 //! What moves, as the export drew it (`web/pocket/models.js`): each model's parts become shapes in the pack's own
-//! streams, and `MODL` says which batches make a model.
+//! streams, and `MODL` says which batches make a model. A car's parts drawn under its pictures (`boxes`: the car
+//! seen along each axis) are `kind::BOXED_INST`, the pictures and their box the car's.
 
 use crate::bins::{Bins, Vx, Written};
 use crate::geom;
 use crate::ir::Array;
 use ny_pack::{self as pack, Model};
 use serde::Deserialize;
+use std::collections::HashMap;
 use std::path::Path;
 
 #[derive(Deserialize)]
@@ -24,10 +26,25 @@ struct Part {
     roughness: f32,
     #[serde(default)]
     metalness: f32,
+    /// The pictures it is drawn under (a key of `boxes`).
+    #[serde(default)]
+    boxed: Option<String>,
 }
 
 fn matte() -> f32 {
     0.8
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct BoxJson {
+    file: String,
+    paint: String,
+    glow: String,
+    gloss: String,
+    glow_scale: f32,
+    min: [f32; 3],
+    size: [f32; 3],
 }
 
 #[derive(Deserialize)]
@@ -39,21 +56,57 @@ struct ModelJson {
 #[derive(Deserialize)]
 struct Models {
     models: Vec<ModelJson>,
+    #[serde(default)]
+    boxes: HashMap<String, BoxJson>,
 }
 
-/// The models' parts: name, then per part its shape and whether it is seen from both sides.
-pub type Parts = Vec<(String, Vec<(u32, bool)>)>;
+/// A model's part: its shape, whether it is seen from both sides, and the pictures it is drawn under.
+pub struct Shaped {
+    pub shape: u32,
+    pub double: bool,
+    pub boxed: Option<u32>,
+}
 
-pub fn shapes(ir: &Path, bins: &mut Bins) -> Result<Parts, String> {
+/// The models: name, parts, and the box their pictures were drawn over.
+pub type Parts = Vec<(String, Vec<Shaped>, Option<([f32; 3], [f32; 3])>)>;
+
+/// A car's pictures: its look (sRGB, alpha its paint), and what it emits by night over its scale (alpha how much of
+/// the sky it mirrors) as the look's `night`.
+fn box_pictures(ir: &Path, b: &BoxJson, textures: &mut crate::tex::Textures) -> Result<u32, String> {
+    let look = image::open(ir.join(&b.file)).map_err(|e| format!("{}: {e}", b.file))?.to_rgba8();
+    let paint = image::open(ir.join(&b.paint)).map_err(|e| format!("{}: {e}", b.paint))?.to_rgba8();
+    let (w, h) = (look.width() as usize, look.height() as usize);
+    let mut px = look.into_raw();
+    for (i, p) in paint.pixels().enumerate() {
+        px[i * 4 + 3] = p.0[0];
+    }
+    let t = textures.add_rgba_alpha(px, w, h, 0.0);
+    let lit = image::open(ir.join(&b.glow)).map_err(|e| format!("{}: {e}", b.glow))?.to_rgba8();
+    let gloss = image::open(ir.join(&b.gloss)).map_err(|e| format!("{}: {e}", b.gloss))?.to_rgba8();
+    let mut px = lit.into_raw();
+    for (i, p) in gloss.pixels().enumerate() {
+        px[i * 4 + 3] = p.0[0];
+    }
+    let glow = textures.add_rgba_alpha(px, w, h, b.glow_scale);
+    textures.entries[t as usize].night = glow;
+    Ok(t)
+}
+
+pub fn shapes(ir: &Path, bins: &mut Bins, textures: &mut crate::tex::Textures) -> Result<Parts, String> {
     let text = std::fs::read_to_string(ir.join("models.json")).map_err(|e| format!("models.json: {e}"))?;
     let models: Models = serde_json::from_str(&text).map_err(|e| format!("models.json: {e}"))?;
     let bytes = std::fs::read(ir.join("models.bin")).map_err(|e| format!("models.bin: {e}"))?;
     let f32s = |a: &Array| -> Vec<f32> { (0..a.len).map(|i| f32::from_le_bytes(bytes[a.off + i * 4..a.off + i * 4 + 4].try_into().unwrap())).collect() };
     let u8s = |a: &Array| -> &[u8] { &bytes[a.off..a.off + a.len] };
     let u32s = |a: &Array| -> Vec<u32> { (0..a.len).map(|i| u32::from_le_bytes(bytes[a.off + i * 4..a.off + i * 4 + 4].try_into().unwrap())).collect() };
+    let mut pictures: HashMap<String, u32> = HashMap::new();
+    for (name, b) in &models.boxes {
+        pictures.insert(name.clone(), box_pictures(ir, b, textures)?);
+    }
     let mut out = Vec::new();
     for m in &models.models {
         let mut parts = Vec::new();
+        let mut boxed = None;
         for p in &m.parts {
             let (pos, mut nrm, col, glow) = (f32s(&p.position), f32s(&p.normal), u8s(&p.color), u8s(&p.glow));
             let idx = u32s(&p.index);
@@ -85,7 +138,9 @@ pub fn shapes(ir: &Path, bins: &mut Bins) -> Result<Parts, String> {
                     } else {
                         ([c[0], c[1], c[2], c[3].min(pack::TINTED)], g)
                     };
-                    Vx { p: [pos[i * 3], pos[i * 3 + 1], pos[i * 3 + 2]], n: n.map(geom::snorm8), ao: 255, a, b, uv: [0.0; 2], gloss: crate::bins::gloss(p.roughness, p.metalness) }
+                    // (a car under its pictures reflects as its glass does; each texel says how much of that it mirrors)
+                    let gloss = if p.boxed.is_some() { crate::bins::gloss(0.15, 0.34) } else { crate::bins::gloss(p.roughness, p.metalness) };
+                    Vx { p: [pos[i * 3], pos[i * 3 + 1], pos[i * 3 + 2]], n: n.map(geom::snorm8), ao: 255, a, b, uv: [0.0; 2], gloss }
                 })
                 .collect();
             // A light probed at the vertices of a large part (a tail lamp in a car's body) would spread over every
@@ -108,9 +163,13 @@ pub fn shapes(ir: &Path, bins: &mut Bins) -> Result<Parts, String> {
                     }
                 }
             }
-            parts.push((bins.shape(&verts, &idx), p.double));
+            let tex = p.boxed.as_ref().and_then(|b| pictures.get(b)).copied();
+            if let Some(b) = p.boxed.as_ref().and_then(|b| models.boxes.get(b)) {
+                boxed = Some((b.min, b.size));
+            }
+            parts.push(Shaped { shape: bins.shape(&verts, &idx), double: p.double, boxed: tex });
         }
-        out.push((m.name.clone(), parts));
+        out.push((m.name.clone(), parts, boxed));
     }
     Ok(out)
 }
@@ -118,18 +177,20 @@ pub fn shapes(ir: &Path, bins: &mut Bins) -> Result<Parts, String> {
 /// Appends the models' batches to the table, past every place's, and returns `MODL`.
 pub fn table(parts: &Parts, w: &mut Written) -> Vec<Model> {
     let mut out = Vec::new();
-    for (name, list) in parts {
+    for (name, list, boxed) in parts {
         let first = w.batches.len() as u32;
-        for &(shape, double) in list {
-            let mut b = w.shape_batches[shape as usize];
-            b.kind = if double { pack::kind::OPEN_INST } else { pack::kind::SOLID_INST };
+        for p in list {
+            let mut b = w.shape_batches[p.shape as usize];
+            b.kind = if p.boxed.is_some() { pack::kind::BOXED_INST } else if p.double { pack::kind::OPEN_INST } else { pack::kind::SOLID_INST };
+            b.tex = p.boxed.unwrap_or(pack::NO_TEX);
             w.batches.push(b);
         }
         let mut n = [0u8; 24];
         for (i, c) in name.bytes().take(23).enumerate() {
             n[i] = c;
         }
-        out.push(Model { name: n, first, count: list.len() as u32 });
+        let (box_min, box_size) = boxed.unwrap_or(([0.0; 3], [0.0; 3]));
+        out.push(Model { name: n, first, count: list.len() as u32, box_min, box_size });
     }
     out
 }

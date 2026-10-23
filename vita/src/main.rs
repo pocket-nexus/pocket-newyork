@@ -524,6 +524,8 @@ fn main() {
 
         // The models of the traffic's kinds (ny_sim::traffic::Kind's order) and of the player's vehicles (Mode's).
         let kinds = ["taxi", "sedan", "suv", "nypd", "bus"].map(|n| city.model(n));
+        // Within 90 m the reference draws its full cars (CAR_PROXY_DISTANCE); past it, the stand-ins above.
+        let kinds_near = ["taxi-near", "sedan-near", "suv-near", "nypd-near", "bus"].map(|n| city.model(n));
         let player_models = [None, city.model("player-car"), city.model("player-cyclist"), city.model("player-helicopter")];
         // The people, posed by the export at eight points of their cycles.
         let walk: Vec<Option<usize>> = (0..8).map(|k| city.model(&format!("person-walk-{k}"))).collect();
@@ -677,12 +679,13 @@ fn main() {
                 let planes = mat::planes(&vp);
                 let reach = set.show.reach.mid.clamp(300.0, 700.0);
                 for v in game.vehicles().iter().filter(|v| v.placed()) {
-                    let Some(m) = kinds[v.kind as usize] else { continue };
+                    let Some(far) = kinds[v.kind as usize] else { continue };
                     let (dx, dz) = (v.x - eye.x, v.z - eye.z);
                     if dx * dx + dz * dz > reach * reach || !ny_view::visible(&planes, [v.x - 7.0, -1.0, v.z - 7.0], [v.x + 7.0, 5.0, v.z + 7.0]) {
                         continue;
                     }
-                    // Paint is linear; the city is lit in the display's space.
+                    let m = if dx * dx + dz * dz < 90.0 * 90.0 { kinds_near[v.kind as usize].unwrap_or(far) } else { far };
+                    // Paint is linear; it multiplies colours that are sRGB.
                     let tint = display(v.paint);
                     placed.push((m, city::placed(v.x, 0.0, v.z, v.yaw, v.pitch, v.roll, tint)));
                 }

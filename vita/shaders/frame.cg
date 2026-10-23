@@ -66,6 +66,13 @@ float2 shadow_map(float3 world, float3 n, float4 frame[6])
     return (world.xz + n.xz * SHADOW_OUT) * frame[3].y + frame[3].zw;
 }
 
+// By night, the lamps' light at a point: what they leave under them (uLamp) and, as the street and its storefronts
+// hand it on, a share of their light around it (uAround), both as square roots of a share of uLook[2].x.
+half3 lamps(half3 under, half3 around, float reach, float4 look[3])
+{
+    return (under * under + around * around * (half)AROUND) * (half)(look[2].x * reach);
+}
+
 // Linear light to what the display shows, under `haze` of the draw's haze.
 half3 shown(half3 c, half haze, float4 look[3])
 {

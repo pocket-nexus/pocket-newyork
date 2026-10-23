@@ -2,6 +2,7 @@ uniform sampler2D uFacade;
 uniform sampler2D uNight;
 uniform sampler2D uShadow;
 uniform sampler2D uLamp;
+uniform sampler2D uAround;
 // See frame.cg; [1].a: the rooms' brightness by night over the night page's scale
 uniform float4 uLook[3];
 
@@ -10,8 +11,7 @@ half4 main(float2 vUv : TEXCOORD0, float2 vMap : TEXCOORD1, float vHeight : TEXC
     half lit = (half)saturate((vHeight - tex2D(uShadow, vMap).r * SHADOW_UNIT) * SHADOW_K + 1.0);
     half3 light = vLight.rgb + (half3)uLook[1].rgb * (vLight.a * lit);
 #ifdef NIGHT
-    half3 l = (half3)tex2D(uLamp, vLamp).rgb;
-    light += l * l * (half)(uLook[2].x * saturate(1.0 - vHeight * 0.12));
+    light += lamps((half3)tex2D(uLamp, vLamp).rgb, (half3)tex2D(uAround, vLamp).rgb, saturate(1.0 - vHeight * 0.12), uLook);
 #endif
     half3 a = (half3)tex2D(uFacade, vUv).rgb * vTint.rgb;
     half3 c = a * a * light * ((half)LIGHT_SCALE * vSpec.a) + vSpec.rgb;

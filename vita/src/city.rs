@@ -29,6 +29,8 @@ const LEAF_V: &str = include_str!("../shaders/leaf_v.cg");
 const LEAF_F: &str = include_str!("../shaders/leaf_f.cg");
 const GROUND_F: &str = include_str!("../shaders/ground_f.cg");
 const PICTURE_V: &str = include_str!("../shaders/picture_v.cg");
+const BOX_V: &str = include_str!("../shaders/box_v.cg");
+const BOX_F: &str = include_str!("../shaders/box_f.cg");
 const PICTURE_F: &str = include_str!("../shaders/picture_f.cg");
 
 /// Light reaches the fragments as a colour, which holds 0..1: it is carried divided by this.
@@ -145,11 +147,13 @@ struct Pass {
     tile: Param,
     lamp_map: Param,
     lamp: Option<u32>,
+    around: Option<u32>,
     vp: Param,
     bx: Param,
     frame: Param,
     look: Param,
     gloss: Param,
+    bake: Param,
     units: [u32; 2],
     shadow: Option<u32>,
 }
@@ -157,14 +161,17 @@ struct Pass {
 impl Pass {
     unsafe fn new(prog: Program, pictures: [&str; 2]) -> Pass {
         let units = pictures.map(|name| if name.is_empty() { 0 } else { prog.fs.sampler_index(name).unwrap_or(0) });
-        Pass { mvp: prog.vs.param("uMvp"), tile: prog.vs.param("uTile"), lamp_map: prog.vs.param("uLampMap"), lamp: prog.fs.sampler_index("uLamp"), vp: prog.vs.param("uVp"), bx: prog.vs.param("uBox"), frame: prog.vs.param("uFrame"), look: prog.fs.param("uLook"), gloss: prog.vs.param("uGloss"), units, shadow: prog.fs.sampler_index("uShadow"), prog }
+        Pass { mvp: prog.vs.param("uMvp"), tile: prog.vs.param("uTile"), lamp_map: prog.vs.param("uLampMap"), lamp: prog.fs.sampler_index("uLamp"), around: prog.fs.sampler_index("uAround"), vp: prog.vs.param("uVp"), bx: prog.vs.param("uBox"), frame: prog.vs.param("uFrame"), look: prog.fs.param("uLook"), gloss: prog.vs.param("uGloss"), bake: prog.vs.param("uBake"), units, shadow: prog.fs.sampler_index("uShadow"), prog }
     }
 
-    /// Binds the program, the shadow window and the lamps' light.
-    unsafe fn bind(&self, ctx: *mut g::SceGxmContext, shadow: &g::SceGxmTexture, lamp: &g::SceGxmTexture) {
+    /// Binds the program, the shadow window and the lamps' light (under them, and around).
+    unsafe fn bind(&self, ctx: *mut g::SceGxmContext, shadow: &g::SceGxmTexture, lamp: &g::SceGxmTexture, around: &g::SceGxmTexture) {
         self.prog.bind(ctx, false);
         if let Some(unit) = self.shadow {
             g::sceGxmSetFragmentTexture(ctx, unit, shadow);
+        }
+        if let Some(unit) = self.around {
+            g::sceGxmSetFragmentTexture(ctx, unit, around);
         }
         if let Some(unit) = self.lamp {
             g::sceGxmSetFragmentTexture(ctx, unit, lamp);
@@ -227,10 +234,15 @@ pub struct CityGpu {
     inst_night: Pass,
     inst_open_night: Pass,
     leaf_night: Pass,
+    /// Cars under their pictures (`kind::BOXED_INST`), by day and by night.
+    boxed: Pass,
+    boxed_night: Pass,
     picture: Pass,
     picture_inst: Pass,
-    /// The lamps' light on the ground by night, and from world x and z to its texture coordinates.
+    /// The lamps' light on the ground by night, and from world x and z to its texture coordinates; and that light
+    /// around a point (over about 80 m), on the same coordinates.
     lamp: g::SceGxmTexture,
+    around: g::SceGxmTexture,
     lamp_map: [f32; 4],
     /// The light a channel's full value stands for.
     pub lamp_unit: f32,
@@ -248,7 +260,7 @@ pub struct CityGpu {
 /// development build's boot switches add, for measurements.)
 pub fn scene_defines(shadow_unit: f32, extra: &str) -> String {
     format!(
-        "{extra}#define UV_RANGE {:.1}\n#define LIGHT_SCALE {LIGHT_SCALE:.1}\n#define GLOW_RANGE {:.1}\n#define SHADOW_UNIT {shadow_unit:.3}\n#define SHADOW_K {:.3}\n#define SHADOW_OUT {SHADOW_OUT:.1}\n{FRAME}",
+        "{extra}#define AROUND 0.5\n#define UV_RANGE {:.1}\n#define LIGHT_SCALE {LIGHT_SCALE:.1}\n#define GLOW_RANGE {:.1}\n#define SHADOW_UNIT {shadow_unit:.3}\n#define SHADOW_K {:.3}\n#define SHADOW_OUT {SHADOW_OUT:.1}\n{FRAME}",
         pack::UV_RANGE,
         pack::GLOW_RANGE,
         1.0 / SHADOW_SOFT
@@ -301,6 +313,8 @@ impl CityGpu {
         let inst_night = Pass::new(gpu.program("inst_night", &night, INST_V, SOLID_F, &inst_streams, msaa, opaque)?, ["", ""]);
         let inst_open_night = Pass::new(gpu.program("inst_open_night", &night_open, INST_V, SOLID_F, &inst_streams, msaa, opaque)?, ["", ""]);
         let leaf_night = Pass::new(gpu.program("leaf_night", &night, LEAF_V, LEAF_F, &leaf_streams, msaa, opaque)?, ["uLeaves", ""]);
+        let boxed = Pass::new(gpu.program("boxed", &defines, BOX_V, BOX_F, &inst_streams, msaa, opaque)?, ["uPicture", "uNight"]);
+        let boxed_night = Pass::new(gpu.program("boxed_night", &night, BOX_V, BOX_F, &inst_streams, msaa, opaque)?, ["uPicture", "uNight"]);
         let picture_stream = [Stream { stride: 20, instanced: false, attrs: &PICTURE_ATTRS }];
         let picture_streams = [Stream { stride: 20, instanced: false, attrs: &PICTURE_ATTRS }, Stream { stride: 52, instanced: true, attrs: &INST_ATTRS[..3] }];
         let picture = Pass::new(gpu.program("picture", &defines, PICTURE_V, PICTURE_F, &picture_stream, msaa, opaque)?, ["uPicture", ""]);
@@ -341,7 +355,8 @@ impl CityGpu {
             }
             let mut bytes = vec![0u8; e.size as usize];
             p.read_into(pack::TDAT, e.offset as usize, bytes.as_mut_ptr(), bytes.len())?;
-            let mut t = up.texture(vram, Format::Bc1, e.width, e.height, e.mips, &bytes)?;
+            let format = if e.format == pack::tex_format::BC3 { Format::Bc3 } else { Format::Bc1 };
+            let mut t = up.texture(vram, format, e.width, e.height, e.mips, &bytes)?;
             up.flush();
             t.set_wrap(Wrap::Repeat, Wrap::Repeat);
             t.set_filter(true, true);
@@ -373,6 +388,54 @@ impl CityGpu {
         let (sx, sz) = (1.0 / (head.w as f32 * head.step), 1.0 / (head.h as f32 * head.step));
         let lamp_map = [sx, -head.x0 * sx, sz, -head.z0 * sz];
         texture_bytes += texels;
+        // The lamps' light around a point, as the street and its storefronts hand it on: the pools averaged over
+        // 16 m cells, then twice over 5 × 5 of those (about 80 m), as the same square roots of a share of `unit`.
+        let decode = |v: u16| [((v >> 11) & 31) as f32 / 31.0, ((v >> 5) & 63) as f32 / 63.0, (v & 31) as f32 / 31.0].map(|s| s * s);
+        const D: u32 = 4;
+        let (cw, ch) = (head.w.div_ceil(D), head.h.div_ceil(D));
+        let mut coarse = vec![[0.0f32; 3]; (cw * ch) as usize];
+        for z in 0..head.h {
+            for x in 0..head.w {
+                let i = ((z * head.w + x) * 2 + 32) as usize;
+                let c = decode(u16::from_le_bytes([lamp_bytes[i], lamp_bytes[i + 1]]));
+                let o = &mut coarse[((z / D) * cw + x / D) as usize];
+                for k in 0..3 {
+                    o[k] += c[k] / (D * D) as f32;
+                }
+            }
+        }
+        for _ in 0..2 {
+            let src = coarse.clone();
+            for z in 0..ch as i32 {
+                for x in 0..cw as i32 {
+                    let mut s = [0.0f32; 3];
+                    for dz in -2..=2 {
+                        for dx in -2..=2 {
+                            let (xx, zz) = ((x + dx).clamp(0, cw as i32 - 1), (z + dz).clamp(0, ch as i32 - 1));
+                            let c = src[(zz as u32 * cw + xx as u32) as usize];
+                            for k in 0..3 {
+                                s[k] += c[k] / 25.0;
+                            }
+                        }
+                    }
+                    coarse[(z as u32 * cw + x as u32) as usize] = s;
+                }
+            }
+        }
+        let around_at = vram.alloc((cw * ch * 2) as usize, 512)?.cast::<u16>();
+        for (i, c) in coarse.iter().enumerate() {
+            let q = |v: f32, max: f32| (v.clamp(0.0, 1.0).sqrt() * max).round() as u16;
+            *around_at.add(i) = q(c[0], 31.0) << 11 | q(c[1], 63.0) << 5 | q(c[2], 31.0);
+        }
+        let mut around: g::SceGxmTexture = core::mem::zeroed();
+        if g::sceGxmTextureInitLinear(&mut around, around_at.cast(), g::SceGxmTextureFormat_SCE_GXM_TEXTURE_FORMAT_U5U6U5_RGB, cw, ch, 1) < 0 {
+            return Err("lamp light around texture".into());
+        }
+        g::sceGxmTextureSetMinFilter(&mut around, g::SceGxmTextureFilter_SCE_GXM_TEXTURE_FILTER_LINEAR);
+        g::sceGxmTextureSetMagFilter(&mut around, g::SceGxmTextureFilter_SCE_GXM_TEXTURE_FILTER_LINEAR);
+        g::sceGxmTextureSetUAddrMode(&mut around, g::SceGxmTextureAddrMode_SCE_GXM_TEXTURE_ADDR_CLAMP);
+        g::sceGxmTextureSetVAddrMode(&mut around, g::SceGxmTextureAddrMode_SCE_GXM_TEXTURE_ADDR_CLAMP);
+        texture_bytes += (cw * ch * 2) as usize;
         drop(lamp_bytes);
 
         let largest = near_cells.iter().map(|c| c.size).max().unwrap_or(0) as usize;
@@ -406,9 +469,12 @@ impl CityGpu {
             inst_night,
             inst_open_night,
             leaf_night,
+            boxed,
+            boxed_night,
             picture,
             picture_inst,
             lamp,
+            around,
             lamp_map,
             lamp_unit: head.unit,
             items: Vec::with_capacity(4096),
@@ -494,7 +560,7 @@ impl CityGpu {
                 _ => if night { &self.inst_open_night } else { &self.inst_open },
             };
             if current.map(|c| c.0) != Some(b.kind) {
-                pass.bind(ctx, shadow, &self.lamp);
+                pass.bind(ctx, shadow, &self.lamp, &self.around);
                 gpu::state_opaque(ctx, if matches!(b.kind, kind::OPEN | kind::OPEN_INST | kind::LEAF_INST | kind::PICTURE | kind::PICTURE_INST) { Cull::None } else { Cull::Cw });
                 current = Some((b.kind, NO_TEX));
             }
@@ -614,19 +680,39 @@ impl CityGpu {
             let model = self.models[m];
             for bi in model.first..model.first + model.count {
                 let b = self.batches[bi as usize];
-                let pass = match (b.kind == kind::OPEN_INST, night) {
-                    (true, true) => &self.inst_open_night,
-                    (true, false) => &self.inst_open,
-                    (false, true) => &self.inst_night,
-                    (false, false) => &self.inst,
+                let boxed = b.kind == kind::BOXED_INST;
+                let pass = match (b.kind == kind::OPEN_INST, boxed, night) {
+                    (_, true, true) => &self.boxed_night,
+                    (_, true, false) => &self.boxed,
+                    (true, _, true) => &self.inst_open_night,
+                    (true, _, false) => &self.inst_open,
+                    (false, _, true) => &self.inst_night,
+                    (false, _, false) => &self.inst,
                 };
-                pass.bind(ctx, shadow, &self.lamp);
+                pass.bind(ctx, shadow, &self.lamp, &self.around);
+                // A car's pictures, and what it emits by night over its glow picture's scale.
+                let mut glow = 0.0;
+                if boxed {
+                    if let Some(Some(t)) = self.textures.get(b.tex as usize) {
+                        g::sceGxmSetFragmentTexture(ctx, pass.units[0], &t.gxm);
+                    }
+                    let night_tex = self.texs.get(b.tex as usize).map(|e| e.night).unwrap_or(NO_TEX);
+                    if let Some(Some(t)) = self.textures.get(night_tex as usize) {
+                        g::sceGxmSetFragmentTexture(ctx, pass.units[1], &t.gxm);
+                    }
+                    glow = self.texs.get(night_tex as usize).map(|e| e.metres).unwrap_or(0.0) * frame[7];
+                }
                 gpu::state_opaque(ctx, if b.kind == kind::OPEN_INST { Cull::None } else { Cull::Cw });
                 let v = Uniforms::vertex(ctx);
                 v.set(pass.vp, vp);
                 v.set(pass.lamp_map, &self.lamp_map);
                 v.set(pass.bx, &[b.origin[0], b.origin[1], b.origin[2], 0.0, b.span[0], b.span[1], b.span[2], 0.0]);
+                if boxed {
+                    let (lo, size) = (model.box_min, model.box_size);
+                    v.set(pass.bake, &[lo[0], lo[1], lo[2], 0.0, 1.0 / size[0].max(1e-3), 1.0 / size[1].max(1e-3), 1.0 / size[2].max(1e-3), 0.0]);
+                }
                 let mut l = *look;
+                l[7] = glow;
                 let r = &placed[at].1.rows;
                 l[9..12].copy_from_slice(&haze.towards(V3 { x: r[0][3], y: r[1][3], z: r[2][3] }));
                 Uniforms::fragment(ctx).set(pass.look, &l);

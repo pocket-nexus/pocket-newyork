@@ -9,9 +9,16 @@
 // Every vertex is drawn twice through its material's colour graph, with white paint and with black paint
 // (`paintColor`), so the compiler knows how much of it is paint, and once through its emission graph by night.
 // Writes `models.json` and `models.bin` (arrays as scene.js writes them).
+//
+// Cars also get their look as pictures (`boxed`): the car material paints lamps, grille, trim and windows from where a
+// point is on the body, finer than its vertices, so the car is drawn flat from each of its axes into one atlas
+// (`bake/car_<name>.png`: sRGB with white paint; `_paint.png`: how much of it is paint, as grey; `_glow.png`: its
+// emission by night over a scale; `_gloss.png`: how much of the sky it mirrors, (1 − roughness) / 0.85 as grey),
+// and a program picks the view by the surface's normal. The near traffic models are the reference's full
+// cars (buildCarGeometry), which it draws within 90 m.
 
 import * as THREE from 'three/webgpu';
-import { float, floor, mod, positionWorld, uniform, vec4, vertexIndex } from 'three/tsl';
+import { float, floor, mod, positionLocal, positionWorld, uniform, vec3, vec4, vertexIndex } from 'three/tsl';
 import { Buffers } from './scene.js';
 import { log, put } from './util.js';
 
@@ -30,9 +37,16 @@ function parts(app) {
   const S = NYC.BODY_SPECS;
   const id = new THREE.Matrix4();
   const out = [];
-  for (const kind of ['taxi', 'sedan', 'suv']) out.push({ model: kind, geo: NYC.buildCarProxyGeometry(S[kind]), mat: NYC.createLoftedCarMaterial(S[kind]), m: id });
-  out.push({ model: 'nypd', geo: NYC.buildCarProxyGeometry(S.sedan), mat: NYC.createLoftedCarMaterial(S.sedan), m: id });
+  for (const kind of ['taxi', 'sedan', 'suv']) {
+    const mat = NYC.createLoftedCarMaterial(S[kind]);
+    out.push({ model: kind, geo: NYC.buildCarProxyGeometry(S[kind]), mat, m: id, boxed: kind });
+    out.push({ model: `${kind}-near`, geo: NYC.buildCarGeometry(S[kind], true), mat, m: id, boxed: kind });
+  }
+  const police = NYC.createLoftedCarMaterial(S.sedan);
+  out.push({ model: 'nypd', geo: NYC.buildCarProxyGeometry(S.sedan), mat: police, m: id, boxed: 'nypd' });
   out.push({ model: 'nypd', geo: NYC.buildLightbarGeometry(S.sedan), mat: NYC.createLightbarMaterial(), m: id });
+  out.push({ model: 'nypd-near', geo: NYC.buildCarGeometry(S.sedan, true), mat: police, m: id, boxed: 'nypd' });
+  out.push({ model: 'nypd-near', geo: NYC.buildLightbarGeometry(S.sedan), mat: NYC.createLightbarMaterial(), m: id });
   const B = NYC.BUS_SPEC;
   out.push({ model: 'bus', geo: NYC.buildLoftedBusBodyGeometry(), mat: NYC.createLoftedBusMaterial(), m: id });
   const wheelMat = NYC.createBusWheelMaterial();
@@ -49,10 +63,161 @@ function parts(app) {
     root.traverse((o) => {
       if (!o.isMesh || o.material?.userData?.pocket?.factory === 'createContactShadowMaterial') return;
       const mat = Array.isArray(o.material) ? o.material[0] : o.material;
-      out.push({ model, geo: o.geometry, mat, m: inv.clone().multiply(o.matrixWorld), name: o.name });
+      const boxed = model === 'player-car' && mat.userData?.pocket?.factory === 'createLoftedCarMaterial' ? 'player-car' : undefined;
+      out.push({ model, geo: o.geometry, mat, m: inv.clone().multiply(o.matrixWorld), name: o.name, boxed });
     });
   }
   return out;
+}
+
+/** The views of a boxed model, in the atlas's cells (two across, four down, 512 × 256 each): the axis looked along
+ *  (towards the model from the + side when `sign` is 1), and the axes that run across and down the cell. */
+const VIEWS = [
+  { axis: 0, sign: 1, across: 2, down: 1 },
+  { axis: 0, sign: -1, across: 2, down: 1 },
+  { axis: 1, sign: 1, across: 2, down: 0 },
+  { axis: 1, sign: -1, across: 2, down: 0 },
+  { axis: 2, sign: 1, across: 0, down: 1 },
+  { axis: 2, sign: -1, across: 0, down: 1 }
+];
+const CELL = [512, 256];
+const ATLAS = 1024;
+
+/** A boxed model's look: its parts drawn flat along each axis into the atlas (see the head of this file). A vertex goes
+ *  where the program will look it up: `(p - min) / size` across and down its view's cell, its depth along the view's
+ *  axis, so the nearest surface along it keeps its texel. */
+async function bakeBox(app, renderer, camera, name, list) {
+  const box = new THREE.Box3();
+  for (const p of list) {
+    p.geo.computeBoundingBox();
+    box.union(p.geo.boundingBox.clone().applyMatrix4(p.m));
+  }
+  const min = box.min.toArray();
+  const size = box.getSize(new THREE.Vector3()).toArray().map((x) => Math.max(x, 1e-3));
+  const draw = async (view, which, paint) => {
+    const scene = new THREE.Scene();
+    for (const part of list) {
+      const geo = new THREE.BufferGeometry();
+      for (const [k, a] of Object.entries(part.geo.attributes)) if (!a.isInstancedBufferAttribute) geo.setAttribute(k, a);
+      if (part.geo.index) geo.setIndex(part.geo.index);
+      const n = geo.attributes.position.count;
+      geo.setAttribute('paintColor', new THREE.BufferAttribute(new Float32Array(n * 3).fill(paint), 3));
+      geo.setAttribute('carState', new THREE.BufferAttribute(new Float32Array(n * 4), 4));
+      geo.setAttribute('busState', new THREE.BufferAttribute(new Float32Array(n * 4), 4));
+      const orig = part.mat;
+      const m = new THREE.MeshBasicNodeMaterial();
+      m.fog = false;
+      m.side = THREE.DoubleSide;
+      if (which === 'albedo') {
+        if (orig.color) m.color.copy(orig.color);
+        m.map = orig.map ?? null;
+        m.colorNode = orig.colorNode ?? null;
+      } else if (which === 'gloss') {
+        m.colorNode = vec3(orig.roughnessNode ?? float(orig.roughness ?? 1), 0, 0);
+      } else {
+        m.color.copy(orig.emissive ? orig.emissive.clone().multiplyScalar(orig.emissiveIntensity ?? 1) : new THREE.Color(0, 0, 0));
+        m.colorNode = orig.emissiveNode ?? null;
+      }
+      const q = uniform(part.m).mul(vec4(positionLocal, 1)).xyz.sub(uniform(new THREE.Vector3(...min))).div(uniform(new THREE.Vector3(...size)));
+      const at = (k) => [q.x, q.y, q.z][k];
+      const depth = view.sign > 0 ? float(1).sub(at(view.axis)) : at(view.axis);
+      m.vertexNode = vec4(at(view.across).mul(2).sub(1), float(1).sub(at(view.down).mul(2)), depth.mul(0.98).add(0.01), 1);
+      const mesh = new THREE.Mesh(geo, m);
+      mesh.frustumCulled = false;
+      scene.add(mesh);
+    }
+    const target = new THREE.RenderTarget(CELL[0], CELL[1], { type: THREE.FloatType, depthBuffer: true });
+    renderer.setRenderTarget(target);
+    renderer.setClearColor(0x000000, 0);
+    renderer.clear();
+    renderer.render(scene, camera);
+    renderer.setRenderTarget(null);
+    const px = await renderer.readRenderTargetPixelsAsync(target, 0, 0, CELL[0], CELL[1]);
+    target.dispose();
+    scene.traverse((o) => o.material?.dispose?.());
+    return px;
+  };
+  const albedo = new Float32Array(ATLAS * ATLAS * 4);
+  const glow = new Float32Array(ATLAS * ATLAS * 4);
+  const shine = new Float32Array(ATLAS * ATLAS);
+  const { lighting } = app;
+  for (let k = 0; k < VIEWS.length; k++) {
+    lighting.applyPreset('midday', true);
+    const white = await draw(VIEWS[k], 'albedo', 1);
+    const black = await draw(VIEWS[k], 'albedo', 0);
+    const rough = await draw(VIEWS[k], 'gloss', 1);
+    lighting.applyPreset('midnight', true);
+    const lit = await draw(VIEWS[k], 'emission', 1);
+    const [cx, cy] = [(k % 2) * CELL[0], Math.floor(k / 2) * CELL[1]];
+    for (let y = 0; y < CELL[1]; y++) for (let x = 0; x < CELL[0]; x++) {
+      const i = (y * CELL[0] + x) * 4, o = ((cy + y) * ATLAS + cx + x) * 4;
+      if (white[i + 3] <= 0) continue;
+      const lw = white[i] + white[i + 1] + white[i + 2], lb = black[i] + black[i + 1] + black[i + 2];
+      for (let c = 0; c < 3; c++) {
+        albedo[o + c] = white[i + c];
+        glow[o + c] = Math.max(0, lit[i + c]);
+      }
+      albedo[o + 3] = lw > 1e-4 ? Math.min(1, Math.max(0, 1 - lb / lw)) : 0;
+      glow[o + 3] = 1;
+      shine[(cy + y) * ATLAS + cx + x] = Math.min(1, Math.max(0, (1 - rough[i]) / 0.85));
+    }
+  }
+  // Texels no surface reached take their neighbours' (a mip or a filter would read black past an edge).
+  const covered = new Uint8Array(ATLAS * ATLAS);
+  for (let i = 0; i < covered.length; i++) covered[i] = glow[i * 4 + 3] > 0 ? 1 : 0;
+  for (let pass = 0; pass < 12; pass++) {
+    const next = covered.slice();
+    for (let y = 0; y < ATLAS; y++) for (let x = 0; x < ATLAS; x++) {
+      const i = y * ATLAS + x;
+      if (covered[i]) continue;
+      let n = 0;
+      const sum = [0, 0, 0, 0, 0, 0, 0];
+      for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+        const xx = x + dx, yy = y + dy;
+        if (xx < 0 || yy < 0 || xx >= ATLAS || yy >= ATLAS || !covered[yy * ATLAS + xx]) continue;
+        const j = (yy * ATLAS + xx) * 4;
+        for (let c = 0; c < 4; c++) sum[c] += albedo[j + c];
+        for (let c = 0; c < 3; c++) sum[4 + c] += glow[j + c];
+        shine[i] = Math.max(shine[i], shine[yy * ATLAS + xx]);
+        n++;
+      }
+      if (!n) continue;
+      for (let c = 0; c < 4; c++) albedo[i * 4 + c] = sum[c] / n;
+      for (let c = 0; c < 3; c++) glow[i * 4 + c] = sum[4 + c] / n;
+      next[i] = 1;
+    }
+    covered.set(next);
+  }
+  let peak = 1e-3;
+  for (let i = 0; i < ATLAS * ATLAS; i++) peak = Math.max(peak, glow[i * 4], glow[i * 4 + 1], glow[i * 4 + 2]);
+  const scale = Math.max(1, peak);
+  // (three pictures, each opaque: a canvas keeps colour premultiplied by alpha, so a mask in alpha loses the colour)
+  const a8 = new Uint8ClampedArray(ATLAS * ATLAS * 4);
+  const p8 = new Uint8ClampedArray(ATLAS * ATLAS * 4);
+  const g8 = new Uint8ClampedArray(ATLAS * ATLAS * 4);
+  const s8 = new Uint8ClampedArray(ATLAS * ATLAS * 4);
+  let paintSum = 0;
+  for (let i = 0; i < ATLAS * ATLAS; i++) {
+    for (let c = 0; c < 3; c++) {
+      a8[i * 4 + c] = toSrgb(albedo[i * 4 + c]);
+      g8[i * 4 + c] = toSrgb(glow[i * 4 + c] / scale);
+      p8[i * 4 + c] = Math.round(albedo[i * 4 + 3] * 255);
+    }
+    paintSum += albedo[i * 4 + 3];
+    s8[i * 4] = s8[i * 4 + 1] = s8[i * 4 + 2] = Math.round(shine[i] * 255);
+    a8[i * 4 + 3] = p8[i * 4 + 3] = g8[i * 4 + 3] = s8[i * 4 + 3] = 255;
+  }
+  const png = async (bytes) => {
+    const c = new OffscreenCanvas(ATLAS, ATLAS);
+    c.getContext('2d').putImageData(new ImageData(bytes, ATLAS, ATLAS), 0, 0);
+    return c.convertToBlob({ type: 'image/png' });
+  };
+  await put(`bake/car_${name}.png`, await png(a8));
+  await put(`bake/car_${name}_paint.png`, await png(p8));
+  await put(`bake/car_${name}_glow.png`, await png(g8));
+  await put(`bake/car_${name}_gloss.png`, await png(s8));
+  log(`  ${name}: box ${min.map((x) => x.toFixed(2))} + ${size.map((x) => x.toFixed(2))}, ${((paintSum / (ATLAS * ATLAS)) * 100).toFixed(0)}% paint, glow over ${scale.toFixed(2)}`);
+  return { file: `bake/car_${name}.png`, paint: `bake/car_${name}_paint.png`, glow: `bake/car_${name}_glow.png`, gloss: `bake/car_${name}_gloss.png`, glowScale: scale, min, size };
 }
 
 /** Each vertex's value of `graph` (a colour node, or a plain colour) with `paint`; `which` 'position' reads where the
@@ -195,7 +360,12 @@ export async function exportModels(app) {
   camera.updateMatrixWorld();
   const buffers = new Buffers();
   const models = new Map();
-  for (const part of [...parts(app), ...(await people(app, renderer, camera))]) {
+  const all = [...parts(app), ...(await people(app, renderer, camera))];
+  const boxes = {};
+  for (const name of new Set(all.filter((p) => p.boxed).map((p) => p.boxed))) {
+    boxes[name] = await bakeBox(app, renderer, camera, name, all.filter((p) => p.boxed === name));
+  }
+  for (const part of all) {
     const g = part.geo;
     const n = g.attributes.position.count;
     lighting.applyPreset('midday', true);
@@ -247,12 +417,13 @@ export async function exportModels(app) {
       roughness: part.mat.roughness ?? 0.8,
       metalness: part.mat.metalness ?? 0,
       // A posed person's normals are the compiler's to work out from where its vertices are.
-      posed: !!part.positions
+      posed: !!part.positions,
+      boxed: part.boxed ?? null
     });
     models.set(part.model, list);
   }
   lighting.applyPreset('golden', true);
-  await put('models.json', JSON.stringify({ models: [...models].map(([name, parts]) => ({ name, parts })) }));
+  await put('models.json', JSON.stringify({ models: [...models].map(([name, parts]) => ({ name, parts })), boxes }));
   await put('models.bin', buffers.blob());
   log(`models: ${models.size} models, ${[...models.values()].reduce((s, p) => s + p.length, 0)} parts`);
 }

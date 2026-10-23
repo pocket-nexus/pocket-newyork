@@ -45,7 +45,7 @@ use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
 pub const MAGIC: u32 = u32::from_le_bytes(*b"NYPK");
-pub const VERSION: u32 = 13;
+pub const VERSION: u32 = 14;
 
 pub const fn tag(t: &[u8; 4]) -> u32 {
     u32::from_le_bytes(*t)
@@ -135,10 +135,14 @@ pub mod kind {
     pub const PICTURE: u32 = 7;
     /// As `PICTURE`, one shape at every `Instance` (a shop's sign along every block).
     pub const PICTURE_INST: u32 = 8;
-    pub const COUNT: usize = 9;
+    /// A model's part under pictures of the model seen along each of its axes (`tex`: sRGB with white paint, alpha
+    /// how much is paint; its `night`: what it emits by night over `metres`), looked up by the box its `Model`
+    /// holds: `SolidVertex` shapes, one at every `Instance`.
+    pub const BOXED_INST: u32 = 9;
+    pub const COUNT: usize = 10;
 
     pub fn instanced(kind: u32) -> bool {
-        kind == SOLID_INST || kind == OPEN_INST || kind == LEAF_INST || kind == PICTURE_INST
+        kind == SOLID_INST || kind == OPEN_INST || kind == LEAF_INST || kind == PICTURE_INST || kind == BOXED_INST
     }
 }
 
@@ -400,6 +404,9 @@ pub struct Model {
     pub name: [u8; 24],
     pub first: u32,
     pub count: u32,
+    /// The box its pictures were drawn over (`kind::BOXED_INST`), in its own frame; all zero without them.
+    pub box_min: [f32; 3],
+    pub box_size: [f32; 3],
 }
 
 impl Model {

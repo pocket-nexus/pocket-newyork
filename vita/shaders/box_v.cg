@@ -1,0 +1,49 @@
+// A car's part under pictures of the car seen along each of its axes: as inst_v.cg, and where the point is in the box
+// the pictures were drawn over, and which way its surface looks there.
+
+void main(
+    float3 aPosition,
+    float3 aNormal,
+    float aAo,
+    float4 aColor,
+    float4 aGlow,
+    float2 aGloss,
+    float4 aRow0,
+    float4 aRow1,
+    float4 aRow2,
+    float4 aTint,
+    uniform float4x4 uVp,
+    uniform float4 uBox[2],
+    uniform float4 uFrame[6],
+    // The box the car's pictures were drawn over, in its own frame: its corner, and 1 / its size
+    uniform float4 uBake[2],
+#ifdef NIGHT
+    uniform float4 uLampMap,
+    out float3 oLamp : TEXCOORD3,
+#endif
+    out float4 oPosition : POSITION,
+    out float3 oAt : TEXCOORD0,
+    out float2 oMap : TEXCOORD1,
+    out float oHeight : TEXCOORD2,
+    out half4 oSpec : TEXCOORD4,
+    out half3 oFacing : TEXCOORD5,
+    out float4 oLight : COLOR0,
+    out float4 oPaint : COLOR1)
+{
+    float3 local = aPosition * uBox[1].xyz + uBox[0].xyz;
+    float4 p = float4(local, 1.0);
+    float3 world = float3(dot(aRow0, p), dot(aRow1, p), dot(aRow2, p));
+    oPosition = mul(uVp, float4(world, 1.0));
+    float3 n = normalize(float3(dot(aRow0.xyz, aNormal), dot(aRow1.xyz, aNormal), dot(aRow2.xyz, aNormal)));
+    oAt = (local - uBake[0].xyz) * uBake[1].xyz;
+    oFacing = (half3)aNormal;
+    oMap = shadow_map(world, n, uFrame);
+    oHeight = world.y;
+    oLight = float4(hemi(n, uFrame) * aAo, max(dot(n, uFrame[0].xyz), 0.0));
+    // The instance's paint, over as much of a texel as the pictures say is paint.
+    oPaint = float4(aTint.rgb * 2.0, haze_of(world, oPosition.w, uFrame));
+    oSpec = reflection(world, n, aGloss, uFrame);
+#ifdef NIGHT
+    oLamp = float3(world.xz * uLampMap.xz + uLampMap.yw, saturate(1.2 - world.y * 0.1));
+#endif
+}

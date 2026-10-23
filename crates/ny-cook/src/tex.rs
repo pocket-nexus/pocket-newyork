@@ -46,6 +46,15 @@ fn halve(px: &[u8], w: usize, h: usize) -> (Vec<u8>, usize, usize) {
 impl Textures {
     /// Adds an RGBA picture with every level down to 4 × 4, as BC1; returns its index.
     pub fn add_rgba(&mut self, px: Vec<u8>, w: usize, h: usize, metres: f32) -> u32 {
+        self.add_as(px, w, h, metres, tex_format::BC1)
+    }
+
+    /// As `add_rgba`, keeping its alpha: BC3.
+    pub fn add_rgba_alpha(&mut self, px: Vec<u8>, w: usize, h: usize, metres: f32) -> u32 {
+        self.add_as(px, w, h, metres, tex_format::BC3)
+    }
+
+    fn add_as(&mut self, px: Vec<u8>, w: usize, h: usize, metres: f32, format: u32) -> u32 {
         if self.means.len() < self.entries.len() + 1 {
             self.means.push(mean(&px));
         }
@@ -53,9 +62,10 @@ impl Textures {
         let (mut cur, mut cw, mut ch) = (px, w, h);
         let mut mips = 0;
         loop {
-            let size = tex_format::level_bytes(tex_format::BC1, cw as u32, ch as u32);
+            let size = tex_format::level_bytes(format, cw as u32, ch as u32);
             let mut out = vec![0u8; size];
-            texpresso::Format::Bc1.compress(&cur, cw, ch, texpresso::Params::default(), &mut out);
+            let f = if format == tex_format::BC3 { texpresso::Format::Bc3 } else { texpresso::Format::Bc1 };
+            f.compress(&cur, cw, ch, texpresso::Params::default(), &mut out);
             self.data.extend_from_slice(&out);
             mips += 1;
             if cw <= 4 || ch <= 4 {
@@ -70,7 +80,7 @@ impl Textures {
         while self.data.len() % 128 != 0 {
             self.data.push(0);
         }
-        self.entries.push(TexEntry { format: tex_format::BC1, width: w as u32, height: h as u32, mips, offset: offset as u32, size: (self.data.len() - offset) as u32, night: NO_TEX, metres, gloss: [204, 0, 0, 0] });
+        self.entries.push(TexEntry { format, width: w as u32, height: h as u32, mips, offset: offset as u32, size: (self.data.len() - offset) as u32, night: NO_TEX, metres, gloss: [204, 0, 0, 0] });
         self.entries.len() as u32 - 1
     }
 

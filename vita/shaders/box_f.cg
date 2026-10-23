@@ -1,0 +1,39 @@
+uniform sampler2D uPicture;
+uniform sampler2D uNight;
+uniform sampler2D uShadow;
+#ifdef NIGHT
+uniform sampler2D uLamp;
+uniform sampler2D uAround;
+#endif
+// See frame.cg; [1].a: what the car emits by night over its glow picture's scale
+uniform float4 uLook[3];
+
+half4 main(float3 vAt : TEXCOORD0, float2 vMap : TEXCOORD1, float vHeight : TEXCOORD2, half4 vSpec : TEXCOORD4, half3 vFacing : TEXCOORD5,
+#ifdef NIGHT
+    float3 vLamp : TEXCOORD3,
+#endif
+    half4 vLight : COLOR0, half4 vPaint : COLOR1) : COLOR
+{
+    // The view the surface faces most (the atlas: two across, four down; ±x, then ±y, then ±z), across and down it.
+    half3 f = abs(vFacing);
+    float3 at = clamp(vAt, 0.004, 0.996);
+    float2 uv;
+    if (f.x >= f.y && f.x >= f.z)
+        uv = float2(at.z * 0.5 + (vFacing.x > 0.0 ? 0.0 : 0.5), at.y * 0.25);
+    else if (f.y >= f.z)
+        uv = float2(at.z * 0.5 + (vFacing.y > 0.0 ? 0.0 : 0.5), at.x * 0.25 + 0.25);
+    else
+        uv = float2(at.x * 0.5 + (vFacing.z > 0.0 ? 0.0 : 0.5), at.y * 0.25 + 0.5);
+    half4 t = (half4)tex2D(uPicture, uv);
+    half3 a = t.rgb * lerp(half3(1.0, 1.0, 1.0), vPaint.rgb, t.a);
+    half lit = (half)saturate((vHeight - tex2D(uShadow, vMap).r * SHADOW_UNIT) * SHADOW_K + 1.0);
+    half3 light = vLight.rgb + (half3)uLook[1].rgb * (vLight.a * lit);
+#ifdef NIGHT
+    light += lamps((half3)tex2D(uLamp, vLamp.xy).rgb, (half3)tex2D(uAround, vLamp.xy).rgb, vLamp.z, uLook);
+#endif
+    // (the glow picture's alpha: how much of the sky this texel mirrors)
+    half4 e = (half4)tex2D(uNight, uv);
+    half3 c = a * a * light * ((half)LIGHT_SCALE * vSpec.a) + vSpec.rgb * e.a;
+    c += e.rgb * e.rgb * (half)uLook[1].a;
+    return half4(shown(c, vPaint.a, uLook), 1.0);
+}
