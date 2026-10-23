@@ -16,11 +16,13 @@ void main(
     uniform float4x4 uMvp,
 #endif
     uniform float4 uBox[2],
-    uniform float4 uFrame[4],
+    uniform float4 uGloss,
+    uniform float4 uFrame[6],
     out float4 oPosition : POSITION,
     out float2 oUv : TEXCOORD0,
     out float2 oMap : TEXCOORD1,
     out float oHeight : TEXCOORD2,
+    out half4 oSpec : TEXCOORD4,
     out float4 oLight : COLOR0,
     out float4 oHaze : COLOR1)
 {
@@ -38,8 +40,10 @@ void main(
     oMap = shadow_map(world, n, uFrame);
     oHeight = world.y;
     float4 lit = float4(hemi(n, uFrame) * aAo, max(dot(n, uFrame[0].xyz), 0.0));
-    // Unlit: the picture as it is, day and night.
+    // Unlit: the picture as it is, day and night; and it reflects nothing either.
     float4 unlit = float4(1.0 / LIGHT_SCALE, 1.0 / LIGHT_SCALE, 1.0 / LIGHT_SCALE, 0.0);
-    oLight = lerp(lit, unlit, step(0.5, aSign.a));
-    oHaze = float4(0.0, 0.0, 0.0, haze_of(oPosition.w, uFrame));
+    float u = step(0.5, aSign.a);
+    oLight = lerp(lit, unlit, u);
+    oHaze = float4(0.0, 0.0, 0.0, haze_of(world, oPosition.w, uFrame));
+    oSpec = lerp(reflection(world, n, uGloss.xy, uFrame), half4(0.0, 0.0, 0.0, 1.0), (half)u);
 }

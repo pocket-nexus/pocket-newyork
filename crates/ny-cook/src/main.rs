@@ -168,6 +168,80 @@ fn instance_matrix(ir: &Ir, o: &Object, i: usize, cache: &mut HashMap<usize, Vec
     }
 }
 
+/// Splits every edge longer than `max` at its middle until none is, so that what a program works out at the
+/// vertices (the haze, the light reflected) does not stretch across a river. An edge is split by its own length, so
+/// the two triangles that share it agree and no crack opens between them.
+fn tessellate(verts: &mut Vec<Vx>, idx: &[u32], max: f32) -> Vec<u32> {
+    let mut mids: HashMap<(u32, u32), u32> = HashMap::new();
+    let mut out = Vec::with_capacity(idx.len());
+    let mut stack: Vec<[u32; 3]> = idx.chunks(3).map(|f| [f[0], f[1], f[2]]).collect();
+    let long = |verts: &[Vx], a: u32, b: u32| geom::length(geom::sub(verts[a as usize].p, verts[b as usize].p)) > max;
+    let mut mid = |verts: &mut Vec<Vx>, a: u32, b: u32| -> u32 {
+        *mids.entry((a.min(b), a.max(b))).or_insert_with(|| {
+            let (u, v) = (verts[a as usize], verts[b as usize]);
+            let avg = |x: u8, y: u8| ((x as u16 + y as u16 + 1) / 2) as u8;
+            let n = geom::normalize([0, 1, 2].map(|k| u.n[k] as f32 + v.n[k] as f32));
+            verts.push(Vx {
+                p: [0, 1, 2].map(|k| (u.p[k] + v.p[k]) * 0.5),
+                n: n.map(geom::snorm8),
+                ao: avg(u.ao, v.ao),
+                a: [0, 1, 2, 3].map(|k| avg(u.a[k], v.a[k])),
+                b: [0, 1, 2, 3].map(|k| avg(u.b[k], v.b[k])),
+                uv: [(u.uv[0] + v.uv[0]) * 0.5, (u.uv[1] + v.uv[1]) * 0.5],
+                gloss: u.gloss,
+            });
+            verts.len() as u32 - 1
+        })
+    };
+    while let Some([a, b, c]) = stack.pop() {
+        let (ab, bc, ca) = (long(verts, a, b), long(verts, b, c), long(verts, c, a));
+        match (ab, bc, ca) {
+            (false, false, false) => out.extend([a, b, c]),
+            (true, false, false) => {
+                let m = mid(verts, a, b);
+                stack.extend([[a, m, c], [m, b, c]]);
+            }
+            (false, true, false) => {
+                let m = mid(verts, b, c);
+                stack.extend([[a, b, m], [a, m, c]]);
+            }
+            (false, false, true) => {
+                let m = mid(verts, c, a);
+                stack.extend([[a, b, m], [m, b, c]]);
+            }
+            (true, true, false) => {
+                let (m1, m2) = (mid(verts, a, b), mid(verts, b, c));
+                stack.extend([[m1, b, m2], [a, m1, m2], [a, m2, c]]);
+            }
+            (false, true, true) => {
+                let (m1, m2) = (mid(verts, b, c), mid(verts, c, a));
+                stack.extend([[m1, c, m2], [b, m1, m2], [b, m2, a]]);
+            }
+            (true, false, true) => {
+                let (m1, m2) = (mid(verts, c, a), mid(verts, a, b));
+                stack.extend([[m1, a, m2], [c, m1, m2], [c, m2, b]]);
+            }
+            (true, true, true) => {
+                let (m1, m2, m3) = (mid(verts, a, b), mid(verts, b, c), mid(verts, c, a));
+                stack.extend([[a, m1, m3], [m1, b, m2], [m3, m2, c], [m1, m2, m3]]);
+            }
+        }
+    }
+    out
+}
+
+/// What a material's surface reflects, as a vertex carries it. A facade box's material: its roof (`roof`) or, as
+/// its pages take it, its walls (glass among frames or stone).
+fn gloss_of(mat: &ir::Material, roof: bool) -> [u8; 2] {
+    match (mat.factory.as_deref(), roof) {
+        (Some("createCurtainWallMaterial"), true) => bins::gloss(0.54, 0.72),
+        (Some("createCurtainWallMaterial"), false) => bins::gloss(0.12, 0.72),
+        (Some("createPreWarBuildingMaterial"), true) => bins::gloss(0.82, 0.06),
+        (Some("createPreWarBuildingMaterial"), false) => bins::gloss(0.55, 0.06),
+        _ => bins::gloss(mat.roughness.unwrap_or(0.8), mat.metalness.unwrap_or(0.0)),
+    }
+}
+
 fn glow_bytes(e: [f32; 3]) -> [u8; 4] {
     let top = e[0].max(e[1]).max(e[2]);
     if top < 1.0 / 512.0 {
@@ -192,9 +266,9 @@ fn main() {
     let mut textures = tex::Textures::default();
     let facades = facade::load(&ir_dir, &mut textures).unwrap_or_else(|e| panic!("{e}"));
     eprintln!("facades: {} styles, {} pictures", facades.styles.len(), textures.entries.len());
-    let grounds = ground_swatches(&ir_dir, &mut textures);
+    let grounds = ground_swatches(&ir_dir, &mut textures, &ir.materials);
     let leaves = leaves_picture(&ir_dir, &mut textures);
-    let pictures = pictures(&ir_dir, &mut textures);
+    let pictures = pictures(&ir_dir, &mut textures, &ir.materials);
     eprintln!("ground: {} pictures; signs and billboards: {}", grounds.len(), pictures.len());
     let classes: Vec<Class> = ir.objects.iter().map(|o| classify(&ir, o, &facades, &pictures)).collect();
     let mut sources: HashMap<usize, Source> = HashMap::new();
@@ -341,7 +415,7 @@ fn main() {
                 let mut sum = [0u32; 3];
                 let mut n = 0;
                 for (_, tris) in &src.lods[0] {
-                    let (verts, _) = vertices(src, tris, probe, *i, Some((m, &nm, mirror)), false, true);
+                    let (verts, _) = vertices(src, tris, probe, *i, Some((m, &nm, mirror)), false, true, bins::MATTE);
                     for v in &verts {
                         for k in 0..3 {
                             sum[k] += v.a[k] as u32;
@@ -385,17 +459,35 @@ fn main() {
                     let unlit = mat.kind == "MeshBasicNodeMaterial";
                     let ground = mat.factory.as_ref().and_then(|f| grounds.get(f)).copied();
                     let kind = if ground.is_some() { pack::kind::GROUND } else if mat.side == 2 { pack::kind::OPEN } else { pack::kind::SOLID };
+                    // In the world, its long edges split first; then each triangle goes to the place its middle is in.
+                    let (mut all, idx) = vertices(src, tris, probe, *i, Some((m, &nm, mirror)), unlit, false, gloss_of(mat, false));
+                    let idx = tessellate(&mut all, &idx, [128.0, 256.0, 512.0, 128.0][lod]);
+                    if let Some((_, mean)) = ground {
+                        to_tint(&mut all, mean);
+                    }
                     let mut groups: HashMap<(u32, u8), Vec<u32>> = HashMap::new();
-                    for f in tris.chunks(3) {
-                        let c = geom::scale(geom::add(geom::add(geom::point(m, src.pos[f[0] as usize]), geom::point(m, src.pos[f[1] as usize])), geom::point(m, src.pos[f[2] as usize])), 1.0 / 3.0);
+                    let (gx1, gz1) = (city.x0 + city.cells_x as f32 * city.cell, city.z0 + city.cells_z as f32 * city.cell);
+                    for f in idx.chunks(3) {
+                        let c = geom::scale(geom::add(geom::add(all[f[0] as usize].p, all[f[1] as usize].p), all[f[2] as usize].p), 1.0 / 3.0);
+                        // (the reference's water runs on past the city's grid, where nothing sees it)
+                        if c[0] < city.x0 || c[2] < city.z0 || c[0] >= gx1 || c[2] >= gz1 {
+                            continue;
+                        }
                         groups.entry(bins.place(lod_id, c)).or_default().extend_from_slice(f);
                     }
                     let label = format!("{} {} (cut)", o.path.split('/').take(2).collect::<Vec<_>>().join("/"), mat.factory.clone().unwrap_or_else(|| format!("{}#{:06x}", mat.kind.replace("NodeMaterial", ""), mat.color.unwrap_or(0))));
                     for ((place, sub), part) in groups {
-                        let (mut verts, idx) = vertices(src, &part, probe, *i, Some((m, &nm, mirror)), unlit, false);
-                        if let Some((_, mean)) = ground {
-                            to_tint(&mut verts, mean);
-                        }
+                        let mut remap: HashMap<u32, u32> = HashMap::new();
+                        let mut verts: Vec<Vx> = Vec::new();
+                        let idx: Vec<u32> = part
+                            .iter()
+                            .map(|&v| {
+                                *remap.entry(v).or_insert_with(|| {
+                                    verts.push(all[v as usize]);
+                                    verts.len() as u32 - 1
+                                })
+                            })
+                            .collect();
                         if !idx.is_empty() {
                             *spend.entry((lod, label.clone())).or_default() += idx.len() / 3;
                             bins.bin(lod_id, place, kind, ground.map(|g| g.0).unwrap_or(pack::NO_TEX)).add(&verts, &idx, sub);
@@ -419,7 +511,7 @@ fn main() {
                     // without them; any other per-instance difference rides as its mean albedo against the first's.
                     let colors = o.instances.as_ref().and_then(|x| x.color.as_ref()).map(|a| inst_colors.entry(*oid).or_insert_with(|| ir.floats(a, false)).clone());
                     let (shape, mean0) = *shapes.entry(key).or_insert_with(|| {
-                        let (mut verts, idx) = vertices(src, tris, probe, 0, None, unlit, false);
+                        let (mut verts, idx) = vertices(src, tris, probe, 0, None, unlit, false, gloss_of(mat, false));
                         if idx.is_empty() {
                             return (u32::MAX, [1.0; 3]);
                         }
@@ -456,7 +548,7 @@ fn main() {
                 let ground = mat.factory.as_ref().and_then(|f| grounds.get(f)).copied().filter(|_| class == Class::Solid);
                 let kind = if ground.is_some() { pack::kind::GROUND } else if mat.side == 2 { pack::kind::OPEN } else { pack::kind::SOLID };
                 // A facade box gives its roof only: the walls are `facade_instance`'s, the bottom is never seen.
-                let (mut verts, idx) = vertices(src, tris, probe, *i, Some((m, &nm, mirror)), unlit, class == Class::Facade);
+                let (mut verts, idx) = vertices(src, tris, probe, *i, Some((m, &nm, mirror)), unlit, class == Class::Facade, gloss_of(mat, class == Class::Facade));
                 if let Some((_, mean)) = ground {
                     to_tint(&mut verts, mean);
                 }
@@ -509,6 +601,7 @@ fn main() {
     pw.add(pack::NEAR, w.near.clone());
     pw.add(pack::SPAN, pack::slice_bytes(&w.spans).to_vec());
     pw.add(pack::PRST, pack::slice_bytes(&hours(&ir_dir)).to_vec());
+    pw.add(pack::SKYP, skies(&ir_dir));
     pw.add(pack::MODL, pack::slice_bytes(&model_table).to_vec());
     pw.add(pack::HMAP, heights.bytes());
     pw.add(pack::LAMP, lamp_light(&heights, &lamps));
@@ -595,6 +688,8 @@ fn facade_instance(ir: &Ir, o: &Object, i: usize, m: &M4, b: &Aabb, facades: &fa
             wall: wall.map(geom::srgb),
             roof: wall.map(geom::srgb),
             glow: glow_bytes(glow),
+            wall_gloss: gloss_of(&ir.materials[o.material(0)], false),
+            roof_gloss: gloss_of(&ir.materials[o.material(0)], true),
         }
     });
     simple.retain_mut(|q| uncover(q, heights, true));
@@ -620,7 +715,7 @@ fn facade_instance(ir: &Ir, o: &Object, i: usize, m: &M4, b: &Aabb, facades: &fa
 
 /// The vertices a slot's triangles use, once each, coloured by the probe of `inst`; in the world through `world`
 /// (its matrix, normal matrix and whether it mirrors), or in the geometry's own frame.
-fn vertices(src: &Source, tris: &[u32], probe: Option<&ir::Probe>, inst: usize, world: Option<(&M4, &[f32; 9], bool)>, unlit: bool, roof_only: bool) -> (Vec<Vx>, Vec<u32>) {
+fn vertices(src: &Source, tris: &[u32], probe: Option<&ir::Probe>, inst: usize, world: Option<(&M4, &[f32; 9], bool)>, unlit: bool, roof_only: bool, gloss: [u8; 2]) -> (Vec<Vx>, Vec<u32>) {
     let mut remap: HashMap<u32, u32> = HashMap::new();
     let mut verts: Vec<Vx> = Vec::new();
     let mut idx: Vec<u32> = Vec::with_capacity(tris.len());
@@ -664,7 +759,7 @@ fn vertices(src: &Source, tris: &[u32], probe: Option<&ir::Probe>, inst: usize, 
                     Some((m, nm, _)) => (geom::point(m, src.pos[vi]), geom::normal(nm, src.nrm[vi])),
                     None => (src.pos[vi], geom::normalize(src.nrm[vi])),
                 };
-                verts.push(Vx { p, n: nn.map(geom::snorm8), ao: 255, a: color, b: glow, uv: [0.0; 2] });
+                verts.push(Vx { p, n: nn.map(geom::snorm8), ao: 255, a: color, b: glow, uv: [0.0; 2], gloss });
                 n
             });
             idx.push(j);
@@ -717,20 +812,52 @@ fn hours(ir: &std::path::Path) -> Vec<pack::Preset> {
                 night: f(&h["night"]),
                 exposure: f(&h["skyExposure"]),
                 pad: 0.0,
+                light_sky: v3(&h["light"]["sky"]),
+                light_ground: v3(&h["light"]["ground"]),
+                light_sun: v3(&h["light"]["sun"]),
+                haze: [0, 1, 2].map(|k| v3(&h["haze"][k])),
+                fog_height: h["fogHeight"].as_f64().unwrap_or(900.0) as f32,
+                tone: [0, 1, 2, 3].map(|k| h["tone"][k].as_f64().unwrap_or(0.0) as f32),
+                env_horizon: v3(&h["env"]["horizon"]),
+                env_up: v3(&h["env"]["up"]),
             }
         })
         .collect()
 }
 
+/// The hours' skies (`world.json` `hours[].sky`), as `SKYP` holds them.
+fn skies(ir: &std::path::Path) -> Vec<u8> {
+    let text = std::fs::read_to_string(ir.join("world.json")).unwrap_or_else(|e| panic!("world.json: {e}"));
+    let world: serde_json::Value = serde_json::from_str(&text).unwrap();
+    let mut head = pack::SkyHead::default();
+    let mut texels = Vec::new();
+    for id in ["golden", "midday", "twilight", "midnight"] {
+        let h = world["hours"].as_array().unwrap().iter().find(|h| h["id"] == id).unwrap();
+        let file = h["sky"].as_str().unwrap_or_else(|| panic!("world.json: hour {id} has no sky; export again"));
+        let img = image::open(ir.join(file)).unwrap_or_else(|e| panic!("{file}: {e}")).to_rgba8();
+        assert!(head.count == 0 || (img.width(), img.height()) == (head.w, head.h), "the skies differ in size");
+        (head.w, head.h) = (img.width(), img.height());
+        head.count += 1;
+        texels.extend_from_slice(img.as_raw());
+    }
+    let mut out = pack::bytes_of(&head).to_vec();
+    out.extend(texels);
+    out
+}
+
 /// The ground pictures the export baked (`bake.json` `ground`), by the factory of the material that drew them: the
 /// picture and its mean colour (linear).
-fn ground_swatches(ir: &std::path::Path, textures: &mut tex::Textures) -> HashMap<String, (u32, [f32; 3])> {
+fn ground_swatches(ir: &std::path::Path, textures: &mut tex::Textures, materials: &[ir::Material]) -> HashMap<String, (u32, [f32; 3])> {
     let text = std::fs::read_to_string(ir.join("bake.json")).unwrap_or_default();
     let bake: serde_json::Value = serde_json::from_str(&text).unwrap_or(serde_json::Value::Null);
     let mut out = HashMap::new();
     for g in bake["ground"].as_array().into_iter().flatten() {
         let (Some(f), Some(file), Some(metres)) = (g["factory"].as_str(), g["file"].as_str(), g["metres"].as_f64()) else { continue };
         let t = textures.add_png(&ir.join(file), metres as f32).unwrap_or_else(|e| panic!("{e}"));
+        if let Some(mat) = materials.iter().find(|m| m.factory.as_deref() == Some(f)) {
+            let g = gloss_of(mat, false);
+            textures.entries[t as usize].gloss = [g[0], g[1], 0, 0];
+        }
         out.insert(f.to_string(), (t, textures.mean(t)));
     }
     out
@@ -779,6 +906,7 @@ fn tree_instance(ir: &Ir, o: &Object, i: usize, m: &M4, b: &Aabb, src: &Source, 
                 b: [0; 4],
                 // (the picture's rows run from v = 1 down)
                 uv: [u, 1.0 - v],
+                gloss: bins::MATTE,
             });
         }
         let idx: Vec<u32> = tris.iter().flat_map(|(_, t)| t.iter().copied()).collect();
@@ -888,13 +1016,17 @@ fn lamp_light(heights: &heights::Grid, lamps: &[([f32; 3], [f32; 3])]) -> Vec<u8
 
 /// The pictures the export baked of signs and billboards (`bake.json` `pictures`), by material: the picture (its
 /// `metres` holds the scale its texels stand over) and whether the reference does not light it.
-fn pictures(ir: &std::path::Path, textures: &mut tex::Textures) -> HashMap<usize, (u32, bool)> {
+fn pictures(ir: &std::path::Path, textures: &mut tex::Textures, materials: &[ir::Material]) -> HashMap<usize, (u32, bool)> {
     let text = std::fs::read_to_string(ir.join("bake.json")).unwrap_or_default();
     let bake: serde_json::Value = serde_json::from_str(&text).unwrap_or(serde_json::Value::Null);
     let mut out = HashMap::new();
     for p in bake["pictures"].as_array().into_iter().flatten() {
         let (Some(m), Some(file)) = (p["material"].as_u64(), p["file"].as_str()) else { continue };
         let t = textures.add_png(&ir.join(file), p["scale"].as_f64().unwrap_or(1.0) as f32).unwrap_or_else(|e| panic!("{e}"));
+        if let Some(mat) = materials.get(m as usize) {
+            let g = gloss_of(mat, false);
+            textures.entries[t as usize].gloss = [g[0], g[1], 0, 0];
+        }
         out.insert(m as usize, (t, p["unlit"].as_bool().unwrap_or(false)));
     }
     out
@@ -910,7 +1042,7 @@ fn picture_instance(ir: &Ir, o: &Object, i: usize, m: &M4, b: &Aabb, src: &Sourc
     let tint = [128, 128, 128, if unlit { 255 } else { 0 }];
     let vertex = |vi: usize, p: [f32; 3], n: [f32; 3]| {
         let (u, v) = uv.as_ref().map(|(a, s)| (a[vi * s], a[vi * s + 1])).unwrap_or((0.0, 0.0));
-        Vx { p, n: geom::normalize(n).map(geom::snorm8), ao: 255, a: tint, b: [0; 4], uv: [u, 1.0 - v] }
+        Vx { p, n: geom::normalize(n).map(geom::snorm8), ao: 255, a: tint, b: [0; 4], uv: [u, 1.0 - v], gloss: bins::MATTE }
     };
     let idx: Vec<u32> = tris.iter().flat_map(|(_, t)| t.iter().copied()).collect();
     let radius = b.radius();

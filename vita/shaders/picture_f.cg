@@ -1,13 +1,13 @@
 uniform sampler2D uPicture;
 uniform sampler2D uShadow;
-// [0] rgb: the haze; a: the picture's scale (it holds its colours over it). [1] rgb: the sun
+// See frame.cg; [1].a: the picture's scale (it holds its colours over it)
 uniform float4 uLook[3];
 
-half4 main(float2 vUv : TEXCOORD0, float2 vMap : TEXCOORD1, float vHeight : TEXCOORD2, half4 vLight : COLOR0, half4 vHaze : COLOR1) : COLOR
+half4 main(float2 vUv : TEXCOORD0, float2 vMap : TEXCOORD1, float vHeight : TEXCOORD2, half4 vSpec : TEXCOORD4, half4 vLight : COLOR0, half4 vHaze : COLOR1) : COLOR
 {
     half lit = (half)saturate((vHeight - tex2D(uShadow, vMap).r * SHADOW_UNIT) * SHADOW_K + 1.0);
     half3 light = vLight.rgb + (half3)uLook[1].rgb * (vLight.a * lit);
-    half3 c = (half3)tex2D(uPicture, vUv).rgb * light * (half)(uLook[0].a * LIGHT_SCALE);
-    c = lerp(c, (half3)uLook[0].rgb, vHaze.a);
-    return half4(c, 1.0);
+    half3 p = (half3)tex2D(uPicture, vUv).rgb;
+    half3 c = p * p * light * ((half)(uLook[1].a * LIGHT_SCALE) * vSpec.a) + vSpec.rgb;
+    return half4(shown(c, vHaze.a, uLook), 1.0);
 }

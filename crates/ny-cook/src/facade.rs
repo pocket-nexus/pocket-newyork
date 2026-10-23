@@ -88,6 +88,17 @@ pub fn load(ir: &Path, textures: &mut crate::tex::Textures) -> Result<Facades, S
             textures.entries[night as usize].metres = n.scale;
         }
         let _ = p.day.scale;
+        // What the page reflects: a curtain wall's glass and metal, a masonry front's stone among its windows; the
+        // windowless pages, their stone or precast panels.
+        let blank = matches!(p.page.as_str(), "lot" | "stone" | "pier_front" | "pier_rear");
+        let (rough, metal) = match (p.factory.as_str(), blank) {
+            ("createCurtainWallMaterial", false) => (0.12, 0.72),
+            ("createCurtainWallMaterial", true) => (0.88, 0.0),
+            (_, false) => (0.55, 0.06),
+            (_, true) => (0.82, 0.06),
+        };
+        let g = crate::bins::gloss(rough, metal);
+        textures.entries[day as usize].gloss = [g[0], g[1], 0, 0];
         let s = styles.entry(key(&p.factory, &p.args)).or_insert_with(|| Style { window: p.window_width, storey: p.floor_height, pier: p.pier, pages: HashMap::new() });
         s.pages.insert(p.page.clone(), Page { tex: day, base: p.base, rows: p.rows });
     }
@@ -156,7 +167,7 @@ fn walls(style: &Style, m: &M4, bx: [f32; 4], faces: [f32; 4], simple: bool, out
             if s1 - s0 < 0.01 || y1 - y0 < 0.01 {
                 return;
             }
-            let mk = |s: f32, y: f32| Vx { p: corner(s, y), n: nn, ao: 255, a: [128, 128, 128, 255], b: [0; 4], uv: uv(s, y) };
+            let mk = |s: f32, y: f32| Vx { p: corner(s, y), n: nn, ao: 255, a: [128, 128, 128, 255], b: [0; 4], uv: uv(s, y), gloss: crate::bins::MATTE };
             let mut v = [mk(s0, y0), mk(s1, y0), mk(s1, y1), mk(s0, y1)];
             // Counter-clockwise seen from outside.
             let c = geom::cross(geom::sub(v[1].p, v[0].p), geom::sub(v[2].p, v[0].p));

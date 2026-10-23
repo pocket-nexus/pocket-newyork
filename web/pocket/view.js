@@ -61,8 +61,9 @@ function parse(buf) {
   }
   const ts = sec('TEXS');
   const texs = [];
-  for (let i = 0; ts && i < ts.size / 32; i++) {
-    const b = ts.off + i * 32;
+  // TexEntry: 36 bytes (format, width, height, mips, offset, size, night, metres, gloss)
+  for (let i = 0; ts && i < ts.size / 36; i++) {
+    const b = ts.off + i * 36;
     const w = (k) => dv.getUint32(b + k * 4, true);
     texs.push({ format: w(0), width: w(1), height: w(2), mips: w(3), offset: w(4), size: w(5), night: w(6), metres: dv.getFloat32(b + 28, true) });
   }

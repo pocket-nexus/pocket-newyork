@@ -6,16 +6,18 @@ void main(
     float aAo,
     float4 aColor,
     float4 aGlow,
+    float2 aGloss,
     float4 aRow0,
     float4 aRow1,
     float4 aRow2,
     float4 aTint,
     uniform float4x4 uVp,
     uniform float4 uBox[2],
-    uniform float4 uFrame[4],
+    uniform float4 uFrame[6],
     out float4 oPosition : POSITION,
     out float2 oMap : TEXCOORD1,
     out float oHeight : TEXCOORD2,
+    out half4 oSpec : TEXCOORD4,
     out float4 oLight : COLOR0,
     out float4 oColor : COLOR1,
     out float4 oGlow : TEXCOORD0)
@@ -34,7 +36,8 @@ void main(
     oLight = float4(hemi(n, uFrame) * aAo, sun);
     // The tint is the instance's colour (its paint) over as much of the vertex as is paint: alpha 254 is all of it.
     float paint = saturate(aColor.a * 1.004);
-    oColor = float4(aColor.rgb * lerp(float3(1.0, 1.0, 1.0), aTint.rgb * 2.0, paint), haze_of(oPosition.w, uFrame));
+    oColor = float4(saturate(aColor.rgb * lerp(float3(1.0, 1.0, 1.0), aTint.rgb * 2.0, paint)), haze_of(world, oPosition.w, uFrame));
     float on = lerp(uFrame[1].w, 1.0, step(0.998, aColor.a));
     oGlow = float4(aGlow.rgb * (aGlow.a * GLOW_RANGE * on), 0.0);
+    oSpec = reflection(world, n, aGloss, uFrame);
 }

@@ -6,12 +6,14 @@ void main(
     float aAo,
     float4 aColor,
     float4 aGlow,
+    float2 aGloss,
     uniform float4x4 uMvp,
     uniform float4 uBox[2],
-    uniform float4 uFrame[4],
+    uniform float4 uFrame[6],
     out float4 oPosition : POSITION,
     out float2 oMap : TEXCOORD1,
     out float oHeight : TEXCOORD2,
+    out half4 oSpec : TEXCOORD4,
     out float4 oLight : COLOR0,
     out float4 oColor : COLOR1,
     out float4 oGlow : TEXCOORD0)
@@ -27,8 +29,9 @@ void main(
     float sun = max(dot(aNormal, uFrame[0].xyz), 0.0);
 #endif
     oLight = float4(hemi(aNormal, uFrame) * aAo, sun);
-    oColor = float4(aColor.rgb, haze_of(oPosition.w, uFrame));
+    oColor = float4(aColor.rgb, haze_of(world, oPosition.w, uFrame));
     // What glows: by night (w of uFrame[1]), or always (alpha 1).
     float on = lerp(uFrame[1].w, 1.0, step(0.998, aColor.a));
     oGlow = float4(aGlow.rgb * (aGlow.a * GLOW_RANGE * on), 0.0);
+    oSpec = reflection(world, aNormal, aGloss, uFrame);
 }

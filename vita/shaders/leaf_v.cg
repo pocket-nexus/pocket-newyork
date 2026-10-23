@@ -12,7 +12,7 @@ void main(
     float4 aTint,
     uniform float4x4 uVp,
     uniform float4 uBox[2],
-    uniform float4 uFrame[4],
+    uniform float4 uFrame[6],
     out float4 oPosition : POSITION,
     out float2 oUv : TEXCOORD0,
     out float2 oMap : TEXCOORD1,
@@ -29,8 +29,8 @@ void main(
     oMap = shadow_map(world, n, uFrame);
     oHeight = world.y;
     // Cards light from the side that faces the sun, as thin things do; deep in the crown, less.
-    oLight = float4(hemi(n, uFrame) * aAo, (abs(dot(n, uFrame[0].xyz)) * 0.7 + 0.3) * aAo);
+    oLight = float4(hemi(n, uFrame) * aAo, (abs(dot(n, uFrame[0].xyz)) * 0.55 + 0.1) * aAo * aAo);
     // A card takes the tree's tint over the picture; bark keeps its colour (alpha: which it is).
-    oColor = float4(lerp(aBark.rgb, aTint.rgb * 2.0, aBark.a), haze_of(oPosition.w, uFrame));
+    oColor = float4(saturate(lerp(aBark.rgb, aTint.rgb * 2.0, aBark.a)), haze_of(world, oPosition.w, uFrame));
     oLeaf = aBark.a;
 }

@@ -37,6 +37,9 @@ pub struct Box {
     pub wall: [u8; 3],
     pub roof: [u8; 3],
     pub glow: [u8; 4],
+    /// What its walls and its roof reflect (`bins::gloss`).
+    pub wall_gloss: [u8; 2],
+    pub roof_gloss: [u8; 2],
 }
 
 const NONE: u32 = u32::MAX;
@@ -318,8 +321,9 @@ fn prisms(grid: &Grid, x0: f32, z0: f32, n: usize, rules: &Profile, boxes: &[Box
         regions[r as usize].1 = 0;
     }
 
-    // ---- each terrace's colour: the mean of its roofs (in linear light)
+    // ---- each terrace's colour: the mean of its roofs (in linear light), and what its roofs reflect (the first's)
     let mut roof_sum = vec![[0.0f32; 4]; regions.len()];
+    let mut roof_gloss = vec![crate::bins::MATTE; regions.len()];
     for j in 1..=n {
         for i in 1..=n {
             let r = label[at(i, j)];
@@ -329,6 +333,9 @@ fn prisms(grid: &Grid, x0: f32, z0: f32, n: usize, rules: &Profile, boxes: &[Box
             if let Some(c) = cell(i, j) {
                 if grid.owner[c] != 0 {
                     let b = &boxes[grid.owner[c] as usize - 1];
+                    if roof_sum[r as usize][3] == 0.0 {
+                        roof_gloss[r as usize] = b.roof_gloss;
+                    }
                     for k in 0..3 {
                         roof_sum[r as usize][k] += geom::linear(b.roof[k]);
                     }
@@ -364,12 +371,12 @@ fn prisms(grid: &Grid, x0: f32, z0: f32, n: usize, rules: &Profile, boxes: &[Box
 
     let mut counts = [0usize; 2];
     let point = |v: u32| -> [f32; 2] { [x0 + (v as usize % lat) as f32 * grid.step, z0 + (v as usize / lat) as f32 * grid.step] };
-    let emit = |p: [[f32; 3]; 3], nrm: [f32; 3], color: [u8; 3], glow: [u8; 4], verts: &mut Vec<Vx>, idx: &mut Vec<u32>| {
+    let emit = |p: [[f32; 3]; 3], nrm: [f32; 3], color: [u8; 3], glow: [u8; 4], gloss: [u8; 2], verts: &mut Vec<Vx>, idx: &mut Vec<u32>| {
         let base = verts.len() as u32;
         let face = geom::cross(geom::sub(p[1], p[0]), geom::sub(p[2], p[0]));
         let order = if face[0] * nrm[0] + face[1] * nrm[1] + face[2] * nrm[2] < 0.0 { [0, 2, 1] } else { [0, 1, 2] };
         for k in order {
-            verts.push(Vx { p: p[k], n: nrm.map(geom::snorm8), ao: 255, a: [color[0], color[1], color[2], 0], b: glow, uv: [0.0; 2] });
+            verts.push(Vx { p: p[k], n: nrm.map(geom::snorm8), ao: 255, a: [color[0], color[1], color[2], 0], b: glow, uv: [0.0; 2], gloss });
         }
         idx.extend([base, base + 1, base + 2]);
     };
@@ -380,6 +387,7 @@ fn prisms(grid: &Grid, x0: f32, z0: f32, n: usize, rules: &Profile, boxes: &[Box
         let top = regions[r].0;
         let s = roof_sum[r];
         let roof = if s[3] > 0.0 { [0, 1, 2].map(|k| geom::srgb(s[k] / s[3])) } else { [128; 3] };
+        let roof_gloss = roof_gloss[r];
         // Chain the edges into loops. Where two of the terrace's cells touch by a corner, the walk takes the
         // sharper turn, so each loop stays a simple outline.
         let mut next: HashMap<u32, Vec<usize>> = HashMap::new();
@@ -481,7 +489,7 @@ fn prisms(grid: &Grid, x0: f32, z0: f32, n: usize, rules: &Profile, boxes: &[Box
                 for t in t.chunks_exact(3) {
                     let p = [0, 1, 2].map(|k| [flat[t[k] * 2] as f32, top, flat[t[k] * 2 + 1] as f32]);
                     if geom::length(geom::cross(geom::sub(p[1], p[0]), geom::sub(p[2], p[0]))) > 2e-4 {
-                        emit(p, [0.0, 1.0, 0.0], roof, [0; 4], &mut verts, &mut idx);
+                        emit(p, [0.0, 1.0, 0.0], roof, [0; 4], roof_gloss, &mut verts, &mut idx);
                         counts[0] += 1;
                     }
                 }
@@ -529,10 +537,10 @@ fn prisms(grid: &Grid, x0: f32, z0: f32, n: usize, rules: &Profile, boxes: &[Box
                 if bottom == f32::INFINITY {
                     continue;
                 }
-                let (color, glow) = if owner != 0 { (boxes[owner as usize - 1].wall, boxes[owner as usize - 1].glow) } else { ([128; 3], [0; 4]) };
+                let (color, glow, gloss) = if owner != 0 { (boxes[owner as usize - 1].wall, boxes[owner as usize - 1].glow, boxes[owner as usize - 1].wall_gloss) } else { ([128; 3], [0; 4], crate::bins::MATTE) };
                 let (pa0, pb0, pb1, pa1) = ([a[0], bottom, a[1]], [b[0], bottom, b[1]], [b[0], top, b[1]], [a[0], top, a[1]]);
-                emit([pa0, pb0, pb1], nrm, color, glow, &mut verts, &mut idx);
-                emit([pa0, pb1, pa1], nrm, color, glow, &mut verts, &mut idx);
+                emit([pa0, pb0, pb1], nrm, color, glow, gloss, &mut verts, &mut idx);
+                emit([pa0, pb1, pa1], nrm, color, glow, gloss, &mut verts, &mut idx);
                 counts[1] += 2;
             }
         }

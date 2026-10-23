@@ -1,4 +1,6 @@
-half4 main(half3 vColor : TEXCOORD0) : COLOR
+uniform sampler2D uSky;
+
+half4 main(float2 vUv : TEXCOORD0) : COLOR
 {
-    return half4(vColor, 1.0);
+    return half4((half3)tex2D(uSky, vUv).rgb, 1.0);
 }

@@ -29,6 +29,7 @@
 //! | `TEXS` | `TexEntry` table |
 //! | `TDAT` | the pictures' levels, largest first, as `TexEntry` says |
 //! | `PRST` | `Preset` table: the hours the reference offers |
+//! | `SKYP` | `SkyHead`, then per hour (`PRST` order) its sky's panorama, `w × h` RGBA8 texels row by row: longitude from +x towards +z along a row, latitude from straight up to straight down down the rows, as the display shows it |
 //! | `HMAP` | `Heights`, then `u16` per cell of its grid, row by row from the north-west: the top of whatever stands there, in `Heights::unit` metres |
 //! | `LAMP` | `Heights` (its `unit`: the light a value of 31 in a channel stands for), then `u16` per cell, `r << 11 \| g << 5 \| b`: the light the street lamps leave on the ground by night |
 //! | `MODL` | `Model` table: what moves (traffic, the player's vehicles), each a range of instanced batches of `BTCH` |
@@ -44,7 +45,7 @@ use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
 pub const MAGIC: u32 = u32::from_le_bytes(*b"NYPK");
-pub const VERSION: u32 = 10;
+pub const VERSION: u32 = 12;
 
 pub const fn tag(t: &[u8; 4]) -> u32 {
     u32::from_le_bytes(*t)
@@ -66,6 +67,7 @@ pub const NEAR: u32 = tag(b"NEAR");
 pub const TEXS: u32 = tag(b"TEXS");
 pub const TDAT: u32 = tag(b"TDAT");
 pub const PRST: u32 = tag(b"PRST");
+pub const SKYP: u32 = tag(b"SKYP");
 pub const MODL: u32 = tag(b"MODL");
 pub const HMAP: u32 = tag(b"HMAP");
 pub const LAMP: u32 = tag(b"LAMP");
@@ -260,8 +262,9 @@ pub struct WallVertex {
 pub const UV_RANGE: f32 = 64.0;
 
 /// Geometry coloured by vertex, 20 bytes. `color`: albedo, sRGB; `glow`: what it emits by night, rgb over
-/// `glow[3] / 255 × GLOW_RANGE`. A surface the reference does not light (`MeshBasicNodeMaterial`) has black
-/// albedo and its colour as glow, with `GLOW_ALWAYS` in `color[3]`.
+/// `glow[3] / 255 × GLOW_RANGE`; `gloss`: what it reflects, roughness and metalness (0..255 for 0..1). A surface
+/// the reference does not light (`MeshBasicNodeMaterial`) has black albedo and its colour as glow, with
+/// `GLOW_ALWAYS` in `color[3]`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 #[repr(C)]
 pub struct SolidVertex {
@@ -270,7 +273,7 @@ pub struct SolidVertex {
     pub ao: u8,
     pub color: [u8; 4],
     pub glow: [u8; 4],
-    pub pad: [u8; 2],
+    pub gloss: [u8; 2],
 }
 
 pub const GLOW_RANGE: f32 = 16.0;
@@ -305,6 +308,8 @@ pub struct TexEntry {
     pub night: u32,
     /// Metres the picture covers along x and z, for a picture that repeats over the ground; 0 otherwise.
     pub metres: f32,
+    /// What its surface reflects: roughness and metalness (0..255 for 0..1), as the material that drew it has them.
+    pub gloss: [u8; 4],
 }
 
 pub mod tex_format {
@@ -339,6 +344,32 @@ pub struct Preset {
     pub night: f32,
     pub exposure: f32,
     pub pad: f32,
+    /// The light on a white diffuse face, linear, as the export read it back: from the sky and the ground (a
+    /// hemisphere, environment included) and from the sun, with the camera's white balance.
+    pub light_sky: [f32; 3],
+    pub light_ground: [f32; 3],
+    pub light_sun: [f32; 3],
+    /// The haze's colour just over the horizon towards the sun, across from it and away from it, as the display
+    /// shows it.
+    pub haze: [[f32; 3]; 3],
+    /// The height over which the haze thins by e.
+    pub fog_height: f32,
+    /// The grade and ACES of the hour, to what the display shows: y = x(ax + b) / (x(cx + d) + 1).
+    pub tone: [f32; 4],
+    /// The sky a surface reflects (the reference's environment), linear, with its intensity and the white balance:
+    /// just over the horizon, and a third of the way up.
+    pub env_horizon: [f32; 3],
+    pub env_up: [f32; 3],
+}
+
+/// The head of `SKYP`.
+#[derive(Clone, Copy, Debug, Default)]
+#[repr(C)]
+pub struct SkyHead {
+    pub w: u32,
+    pub h: u32,
+    pub count: u32,
+    pub pad: u32,
 }
 
 /// The grid of heights the shadows are swept from: its north-west corner, cell size and extent, and metres per unit

@@ -244,6 +244,8 @@ export async function exportModels(app) {
       index: buffers.add(index),
       unlit: part.mat.type === 'MeshBasicNodeMaterial',
       double: part.mat.side === THREE.DoubleSide,
+      roughness: part.mat.roughness ?? 0.8,
+      metalness: part.mat.metalness ?? 0,
       // A posed person's normals are the compiler's to work out from where its vertices are.
       posed: !!part.positions
     });

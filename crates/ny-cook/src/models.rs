@@ -20,6 +20,14 @@ struct Part {
     double: bool,
     #[serde(default)]
     posed: bool,
+    #[serde(default = "matte")]
+    roughness: f32,
+    #[serde(default)]
+    metalness: f32,
+}
+
+fn matte() -> f32 {
+    0.8
 }
 
 #[derive(Deserialize)]
@@ -62,7 +70,7 @@ pub fn shapes(ir: &Path, bins: &mut Bins) -> Result<Parts, String> {
                     }
                 }
             }
-            let verts: Vec<Vx> = (0..p.verts)
+            let mut verts: Vec<Vx> = (0..p.verts)
                 .map(|i| {
                     let n = geom::normalize([nrm[i * 3], nrm[i * 3 + 1], nrm[i * 3 + 2]]);
                     let c = [col[i * 4], col[i * 4 + 1], col[i * 4 + 2], col[i * 4 + 3]];
@@ -77,9 +85,29 @@ pub fn shapes(ir: &Path, bins: &mut Bins) -> Result<Parts, String> {
                     } else {
                         ([c[0], c[1], c[2], c[3].min(pack::TINTED)], g)
                     };
-                    Vx { p: [pos[i * 3], pos[i * 3 + 1], pos[i * 3 + 2]], n: n.map(geom::snorm8), ao: 255, a, b, uv: [0.0; 2] }
+                    Vx { p: [pos[i * 3], pos[i * 3 + 1], pos[i * 3 + 2]], n: n.map(geom::snorm8), ao: 255, a, b, uv: [0.0; 2], gloss: crate::bins::gloss(p.roughness, p.metalness) }
                 })
                 .collect();
+            // A light probed at the vertices of a large part (a tail lamp in a car's body) would spread over every
+            // triangle that touches it: glow stays on triangles that glow at all three corners; the others take
+            // copies of their glowing corners without it.
+            let mut idx = idx;
+            let glows = |v: &Vx| v.b[3] > 0 && v.a[3] != pack::GLOW_ALWAYS;
+            let mut dark: std::collections::HashMap<u32, u32> = std::collections::HashMap::new();
+            for f in idx.chunks_mut(3) {
+                let lit = f.iter().filter(|&&i| glows(&verts[i as usize])).count();
+                if lit == 0 || lit == 3 {
+                    continue;
+                }
+                for i in f.iter_mut() {
+                    if glows(&verts[*i as usize]) {
+                        *i = *dark.entry(*i).or_insert_with(|| {
+                            verts.push(Vx { b: [0; 4], ..verts[*i as usize] });
+                            verts.len() as u32 - 1
+                        });
+                    }
+                }
+            }
             parts.push((bins.shape(&verts, &idx), p.double));
         }
         out.push((m.name.clone(), parts));

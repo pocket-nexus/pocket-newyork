@@ -1,7 +1,8 @@
 // What the city offers besides its surfaces, as the reference states it: its hours (read back from its lighting
-// after each preset is applied), its places (the teleports of index.html with their names, and the landmarks of
+// after each preset is applied, with how light.js reads it back), its places (the teleports of index.html with their names, and the landmarks of
 // city-config.js) and its cameras (cameras.js). Writes `world.json`.
 
+import { readLight } from './light.js';
 import { log, put } from './util.js';
 
 /** The hours: what LightingSystem.applyPreset leaves on the lights, the fog and the city's uniforms. */
@@ -58,6 +59,8 @@ export async function exportWorld(app) {
     island: NYC.ISLAND_BOUNDS,
     centralPark: NYC.CENTRAL_PARK_BOUNDS
   };
+  const light = await readLight(app);
+  for (const h of world.hours) Object.assign(h, light[h.id]);
   await put('world.json', JSON.stringify(world, null, 1));
   log(`world: ${world.hours.length} hours, ${world.places.length} places, ${world.landmarks.length} landmarks, ${world.cameras.length} cameras`);
 }

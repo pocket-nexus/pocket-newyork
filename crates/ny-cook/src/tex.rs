@@ -70,7 +70,7 @@ impl Textures {
         while self.data.len() % 128 != 0 {
             self.data.push(0);
         }
-        self.entries.push(TexEntry { format: tex_format::BC1, width: w as u32, height: h as u32, mips, offset: offset as u32, size: (self.data.len() - offset) as u32, night: NO_TEX, metres });
+        self.entries.push(TexEntry { format: tex_format::BC1, width: w as u32, height: h as u32, mips, offset: offset as u32, size: (self.data.len() - offset) as u32, night: NO_TEX, metres, gloss: [204, 0, 0, 0] });
         self.entries.len() as u32 - 1
     }
 

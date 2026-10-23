@@ -17,6 +17,16 @@ pub struct Vx {
     pub a: [u8; 4],
     pub b: [u8; 4],
     pub uv: [f32; 2],
+    /// What the surface reflects: roughness and metalness, 0..255 (`gloss`).
+    pub gloss: [u8; 2],
+}
+
+/// A surface that reflects little: roughness 0.8, no metal.
+pub const MATTE: [u8; 2] = [204, 0];
+
+/// Roughness and metalness as a vertex or a picture carries them.
+pub fn gloss(roughness: f32, metalness: f32) -> [u8; 2] {
+    [(roughness.clamp(0.0, 1.0) * 255.0).round() as u8, (metalness.clamp(0.0, 1.0) * 255.0).round() as u8]
 }
 
 #[derive(Default)]
@@ -244,7 +254,7 @@ impl Written {
                         st.walls.push(WallVertex { pos, normal: v.n, ao: v.ao, uv: [q(v.uv[0]), q(v.uv[1])], tint: v.a, pad: [0; 2] });
                     }
                     pack::kind::GROUND => st.grounds.push(GroundVertex { pos, normal: v.n, ao: v.ao, tint: v.a, pad: [0; 2] }),
-                    _ => st.solids.push(SolidVertex { pos, normal: v.n, ao: v.ao, color: v.a, glow: v.b, pad: [0; 2] }),
+                    _ => st.solids.push(SolidVertex { pos, normal: v.n, ao: v.ao, color: v.a, glow: v.b, gloss: v.gloss }),
                 }
             }
             let idx_first = st.indices.len() as u32;

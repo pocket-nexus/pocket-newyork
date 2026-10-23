@@ -414,57 +414,43 @@ impl Timing {
     }
 }
 
-/// A linear colour to the display's: the city is lit in the display's space, as its pages and colours are.
+/// A linear colour as sRGB: what multiplies a probed colour or a picture, which are sRGB.
 fn display(c: [f32; 3]) -> [f32; 3] {
     c.map(|x| if x <= 0.0031308 { x * 12.92 } else { 1.055 * libm::powf(x, 1.0 / 2.4) - 0.055 })
 }
 
-/// The hour's light as the scene programs take it (`shaders/frame.cg`).
-fn frame_light(p: &Preset, lamp_unit: f32) -> ([f32; 16], [f32; 12], [f32; 16], bool) {
-    // The reference lights in linear light under ACES; here a lit face is its colour times light in the display's
-    // space. A face full in the golden-hour sun reads about 1.1 of its colour, one in shade about 0.55.
-    const SUN: f32 = 0.19;
-    const HEMI: f32 = 0.37;
-    let norm = |c: [f32; 3]| {
-        let m = c[0].max(c[1]).max(c[2]).max(1e-4);
-        (c.map(|x| x / m), m)
-    };
-    let (sky_c, sky_i) = norm(p.hemi_sky);
-    let (ground_c, ground_i) = norm(p.hemi_ground);
-    let (sun_c, sun_i) = norm(p.sun);
-    let sky = display(sky_c).map(|x| x * sky_i * HEMI / city::LIGHT_SCALE);
-    let ground = display(ground_c).map(|x| x * ground_i * HEMI / city::LIGHT_SCALE);
-    let sun = display(sun_c).map(|x| x * sun_i * SUN / city::LIGHT_SCALE);
+/// The hour's light as the scene programs take it (`shaders/frame.cg`): `uFrame` (the shadow window's mapping is
+/// the caller's), `uLook`, and whether the rooms are lit.
+fn frame_light(p: &Preset, lamp_unit: f32, eye: V3, ahead: V3) -> (city::Frame, [f32; 12], city::Haze, bool) {
+    let k = 1.0 / city::LIGHT_SCALE;
     // Street lamps and lit signs come on with the dusk (street-details.js: (glow - 0.36) × 1.15).
     let glow = ((p.interior_glow - 0.36) * 1.15).clamp(0.0, 1.25);
     let d = p.sun_dir;
+    let flat = libm::sqrtf(d[0] * d[0] + d[2] * d[2]).max(1e-4);
+    let (s, g) = (p.light_sky, p.light_ground);
+    let ih = 1.0 / p.fog_height.max(1.0);
+    // What a surface reflects of the sky: between just over the horizon and a third of the way up.
+    let env = [0, 1, 2].map(|k| (p.env_horizon[k] + p.env_up[k]) * 0.5);
     #[rustfmt::skip]
     let frame = [
         d[0], d[1], d[2], p.fog_density,
-        sky[0], sky[1], sky[2], glow,
-        ground[0], ground[1], ground[2], p.interior_glow,
+        s[0] * k, s[1] * k, s[2] * k, glow,
+        g[0] * k, g[1] * k, g[2] * k, p.interior_glow,
         1.0, 0.0, 0.0, 0.0,
+        eye.x, eye.y, eye.z, 0.0,
+        env[0], env[1], env[2], 0.0,
     ];
-    let fog = display(p.fog);
+    let haze = city::Haze { colors: p.haze, sun: [d[0] / flat, d[2] / flat], eye, ahead, density: p.fog_density, thins: ih };
+    let sun = p.light_sun.map(|x| x * k);
     // [2].x: the lamps' light, as a texel's full value stands for, as far as the lamps are on.
-    let look = [fog[0], fog[1], fog[2], 0.0, sun[0], sun[1], sun[2], 0.0, lamp_unit * glow / city::LIGHT_SCALE, 0.0, 0.0, 0.0];
-    let top = display(p.sky_top);
-    let horizon = display(p.sky_horizon);
-    let s = display(sun_c);
-    let lift = (d[1] * 4.0 + 0.4).clamp(0.0, 1.0) * (1.0 - p.night);
-    #[rustfmt::skip]
-    let sky_f = [
-        horizon[0], horizon[1], horizon[2], 0.0,
-        top[0], top[1], top[2], 0.0,
-        d[0], d[1], d[2], 0.0,
-        s[0] * lift, s[1] * lift, s[2] * lift, 0.0,
-    ];
-    (frame, look, sky_f, p.interior_glow > 0.3)
+    let look = [p.tone[0], p.tone[1], p.tone[2], p.tone[3], sun[0], sun[1], sun[2], 0.0, lamp_unit * glow * k, 0.0, 0.0, 0.0];
+    (frame, look, haze, p.interior_glow > 0.3)
 }
 
 fn main() {
     unsafe {
-        // Development builds take boot switches from the USB share: {"msaa": 0 | 2 | 4, "title": false, "mode": "play"}.
+        // Development builds take boot switches from the USB share: {"msaa": 0 | 2 | 4, "title": false, "mode": "play",
+        // "defines": [..]}.
         let live = cfg!(feature = "usb-debug");
         let boot: Value = if live { hostfs::read(&format!("{}/boot.json", paths::HOST), 4096).and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or(Value::Null) } else { Value::Null };
         let samples = boot["msaa"].as_u64().unwrap_or(DEFAULT_MSAA);
@@ -514,8 +500,10 @@ fn main() {
             let msaa = display_msaa;
             let heights: ny_pack::Heights = ny_pack::read(&p.read_range(ny_pack::HMAP, 0, 32)?, 0).ok_or("heights record")?;
             let shadow_unit = 65535.0 * heights.unit;
-            let city = CityGpu::load(&mut p, &mut gpu, &mut vram, msaa, shadow_unit, |line| shell.frame(Mode::Loading, line))?;
-            let sky = sky::Sky::new(&mut gpu, msaa)?;
+            // {"defines": ["NAME", …]} compiles the scene programs with those defined (frame.cg's probes).
+            let extra: String = boot["defines"].as_array().into_iter().flatten().filter_map(Value::as_str).map(|d| format!("#define {d}\n")).collect();
+            let city = CityGpu::load(&mut p, &mut gpu, &mut vram, msaa, shadow_unit, &extra, |line| shell.frame(Mode::Loading, line))?;
+            let sky = sky::Sky::new(&mut gpu, &mut vram, msaa, &p.read(ny_pack::SKYP)?)?;
             let mut targets = Arena::new(Kind::Main, 4 * 1024 * 1024);
             let glow = glow::Glow::new(&mut gpu, &mut vram, &mut targets, msaa)?;
             gpu.finish();
@@ -647,7 +635,7 @@ fn main() {
             let aspect = 960.0 / 544.0;
             let vp = mat::mul(&mat::perspective(fov, aspect, 0.4, 30000.0), &mat::view(eye, look_dir));
             let preset = &presets[game.hour.index()];
-            let (mut frame, look, sky_f, night) = frame_light(preset, city.lamp_unit);
+            let (mut frame, look, haze, night) = frame_light(preset, city.lamp_unit, eye, look_dir);
             let sun = preset.sun_dir;
             shadows.update(v3(sun[0], sun[1], sun[2]), eye);
             let map = shadows.mapping();
@@ -674,8 +662,8 @@ fn main() {
             g::vita2d_start_drawing_advanced(core::ptr::null_mut(), 0);
             // The sky covers the whole frame: nothing is cleared.
             g::sceGxmSetViewport(ctx, 480.0, 480.0, 272.0, -272.0, 0.0, 1.0);
-            sky.draw(ctx, &sky_mvp, &sky_f);
-            stats = city.draw(ctx, &vp, eye, &frame, &look, night, shadows.texture(), &set.show, frame_no);
+            sky.draw(ctx, &sky_mvp, game.hour.index());
+            stats = city.draw(ctx, &vp, eye, &frame, &look, &haze, night, shadows.texture(), &set.show, frame_no);
             // What moves: the traffic, and the player's vehicle.
             placed.clear();
             if game.traffic_on && set.models {
@@ -733,7 +721,7 @@ fn main() {
                 }
             }
             if set.models {
-                stats.tris[2] += city.draw_models(ctx, &vp, &frame, &look, shadows.texture(), &mut placed);
+                stats.tris[2] += city.draw_models(ctx, &vp, &frame, &look, &haze, shadows.texture(), &mut placed);
             }
             if set.post {
                 glow.add(ctx, glow_gain);

@@ -2,20 +2,21 @@ uniform sampler2D uFacade;
 uniform sampler2D uNight;
 uniform sampler2D uShadow;
 uniform sampler2D uLamp;
-// [0] rgb: the haze; a: the rooms' brightness by night over the page's scale. [1] rgb: the sun
+// See frame.cg; [1].a: the rooms' brightness by night over the night page's scale
 uniform float4 uLook[3];
 
-half4 main(float2 vUv : TEXCOORD0, float2 vMap : TEXCOORD1, float vHeight : TEXCOORD2, float2 vLamp : TEXCOORD3, half4 vLight : COLOR0, half4 vTint : COLOR1) : COLOR
+half4 main(float2 vUv : TEXCOORD0, float2 vMap : TEXCOORD1, float vHeight : TEXCOORD2, float2 vLamp : TEXCOORD3, half4 vSpec : TEXCOORD4, half4 vLight : COLOR0, half4 vTint : COLOR1) : COLOR
 {
     half lit = (half)saturate((vHeight - tex2D(uShadow, vMap).r * SHADOW_UNIT) * SHADOW_K + 1.0);
     half3 light = vLight.rgb + (half3)uLook[1].rgb * (vLight.a * lit);
 #ifdef NIGHT
     light += (half3)tex2D(uLamp, vLamp).rgb * (half)(uLook[2].x * saturate(1.0 - vHeight * 0.12));
 #endif
-    half3 c = (half3)tex2D(uFacade, vUv).rgb * vTint.rgb * light * (half)LIGHT_SCALE;
+    half3 a = (half3)tex2D(uFacade, vUv).rgb * vTint.rgb;
+    half3 c = a * a * light * ((half)LIGHT_SCALE * vSpec.a) + vSpec.rgb;
 #ifdef NIGHT
-    c += (half3)tex2D(uNight, vUv).rgb * (half)uLook[0].a;
+    half3 e = (half3)tex2D(uNight, vUv).rgb;
+    c += e * e * (half)uLook[1].a;
 #endif
-    c = lerp(c, (half3)uLook[0].rgb, vTint.a);
-    return half4(c, 1.0);
+    return half4(shown(c, vTint.a, uLook), 1.0);
 }

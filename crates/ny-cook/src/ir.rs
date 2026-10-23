@@ -83,6 +83,8 @@ pub struct Material {
     pub map: Option<String>,
     #[serde(default)]
     pub blending: u32,
+    pub roughness: Option<f32>,
+    pub metalness: Option<f32>,
 }
 
 #[derive(Deserialize, Clone, Debug)]

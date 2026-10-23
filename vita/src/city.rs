@@ -33,6 +33,40 @@ const PICTURE_F: &str = include_str!("../shaders/picture_f.cg");
 
 /// Light reaches the fragments as a colour, which holds 0..1: it is carried divided by this.
 pub const LIGHT_SCALE: f32 = 2.0;
+/// What every scene program takes per frame (`uFrame`, `shaders/frame.cg`).
+pub type Frame = [f32; 24];
+
+/// The haze's colour by direction (the sky just over the horizon, as the display shows it): towards the sun,
+/// across from it and away from it, the sun's direction along the ground, and the eye and where it looks.
+pub struct Haze {
+    pub colors: [[f32; 3]; 3],
+    pub sun: [f32; 2],
+    pub eye: V3,
+    pub ahead: V3,
+    /// The haze per metre at the ground, and 1 / the height over which it thins by e.
+    pub density: f32,
+    pub thins: f32,
+}
+
+impl Haze {
+    /// The haze per metre between the eye and a point at height `y`: the mean of exp(−h / H) over the heights
+    /// between.
+    pub fn density_to(&self, y: f32) -> f32 {
+        let (a, b) = (y.max(0.0) * self.thins, self.eye.y.max(0.0) * self.thins);
+        let mean = if (b - a).abs() > 0.002 { (libm::expf(-a) - libm::expf(-b)) / (b - a) } else { libm::expf(-a) };
+        self.density * mean
+    }
+
+    /// The haze's colour towards `at`: a quadratic in the cosine of its angle along the ground to the sun's.
+    pub fn towards(&self, at: V3) -> [f32; 3] {
+        let (dx, dz) = (at.x - self.eye.x, at.z - self.eye.z);
+        let len = libm::sqrtf(dx * dx + dz * dz);
+        let (dx, dz) = if len > 1.0 { (dx / len, dz / len) } else { (self.ahead.x, self.ahead.z) };
+        let c = dx * self.sun[0] + dz * self.sun[1];
+        let [t, s, a] = self.colors;
+        [0, 1, 2].map(|k| s[k] + (t[k] - a[k]) * 0.5 * c + ((t[k] + a[k]) * 0.5 - s[k]) * c * c)
+    }
+}
 /// Slots for cells' records (each as large as the largest record).
 const NEAR_SLOTS: usize = 72;
 /// Instances of models a frame may draw (every car of the traffic, and the player).
@@ -115,6 +149,7 @@ struct Pass {
     bx: Param,
     frame: Param,
     look: Param,
+    gloss: Param,
     units: [u32; 2],
     shadow: Option<u32>,
 }
@@ -122,7 +157,7 @@ struct Pass {
 impl Pass {
     unsafe fn new(prog: Program, pictures: [&str; 2]) -> Pass {
         let units = pictures.map(|name| if name.is_empty() { 0 } else { prog.fs.sampler_index(name).unwrap_or(0) });
-        Pass { mvp: prog.vs.param("uMvp"), tile: prog.vs.param("uTile"), lamp_map: prog.vs.param("uLampMap"), lamp: prog.fs.sampler_index("uLamp"), vp: prog.vs.param("uVp"), bx: prog.vs.param("uBox"), frame: prog.vs.param("uFrame"), look: prog.fs.param("uLook"), units, shadow: prog.fs.sampler_index("uShadow"), prog }
+        Pass { mvp: prog.vs.param("uMvp"), tile: prog.vs.param("uTile"), lamp_map: prog.vs.param("uLampMap"), lamp: prog.fs.sampler_index("uLamp"), vp: prog.vs.param("uVp"), bx: prog.vs.param("uBox"), frame: prog.vs.param("uFrame"), look: prog.fs.param("uLook"), gloss: prog.vs.param("uGloss"), units, shadow: prog.fs.sampler_index("uShadow"), prog }
     }
 
     /// Binds the program, the shadow window and the lamps' light.
@@ -203,10 +238,11 @@ pub struct CityGpu {
 }
 
 /// What every scene program is compiled with.
-/// (`shadow_unit`: metres of height in one unit of the shadow texture as a program reads it.)
-pub fn scene_defines(shadow_unit: f32) -> String {
+/// (`shadow_unit`: metres of height in one unit of the shadow texture as a program reads it; `extra`: lines a
+/// development build's boot switches add, for measurements.)
+pub fn scene_defines(shadow_unit: f32, extra: &str) -> String {
     format!(
-        "#define UV_RANGE {:.1}\n#define LIGHT_SCALE {LIGHT_SCALE:.1}\n#define GLOW_RANGE {:.1}\n#define SHADOW_UNIT {shadow_unit:.3}\n#define SHADOW_K {:.3}\n#define SHADOW_OUT {SHADOW_OUT:.1}\n{FRAME}",
+        "{extra}#define UV_RANGE {:.1}\n#define LIGHT_SCALE {LIGHT_SCALE:.1}\n#define GLOW_RANGE {:.1}\n#define SHADOW_UNIT {shadow_unit:.3}\n#define SHADOW_K {:.3}\n#define SHADOW_OUT {SHADOW_OUT:.1}\n{FRAME}",
         pack::UV_RANGE,
         pack::GLOW_RANGE,
         1.0 / SHADOW_SOFT
@@ -218,7 +254,7 @@ const SHADOW_SOFT: f32 = 2.5;
 const SHADOW_OUT: f32 = 2.5;
 
 const WALL_ATTRS: [(&str, u16, u32, u8); 5] = [("aPosition", 0, U16N, 3), ("aNormal", 6, S8N, 3), ("aAo", 9, U8N, 1), ("aUv", 10, S16N, 2), ("aTint", 14, U8N, 4)];
-const SOLID_ATTRS: [(&str, u16, u32, u8); 5] = [("aPosition", 0, U16N, 3), ("aNormal", 6, S8N, 3), ("aAo", 9, U8N, 1), ("aColor", 10, U8N, 4), ("aGlow", 14, U8N, 4)];
+const SOLID_ATTRS: [(&str, u16, u32, u8); 6] = [("aPosition", 0, U16N, 3), ("aNormal", 6, S8N, 3), ("aAo", 9, U8N, 1), ("aColor", 10, U8N, 4), ("aGlow", 14, U8N, 4), ("aGloss", 18, U8N, 2)];
 const LEAF_ATTRS: [(&str, u16, u32, u8); 5] = [("aPosition", 0, U16N, 3), ("aNormal", 6, S8N, 3), ("aAo", 9, U8N, 1), ("aUv", 10, S16N, 2), ("aBark", 14, U8N, 4)];
 const PICTURE_ATTRS: [(&str, u16, u32, u8); 5] = [("aPosition", 0, U16N, 3), ("aNormal", 6, S8N, 3), ("aAo", 9, U8N, 1), ("aUv", 10, S16N, 2), ("aSign", 14, U8N, 4)];
 const GROUND_ATTRS: [(&str, u16, u32, u8); 4] = [("aPosition", 0, U16N, 3), ("aNormal", 6, S8N, 3), ("aAo", 9, U8N, 1), ("aTint", 10, U8N, 4)];
@@ -227,7 +263,7 @@ const INST_ATTRS: [(&str, u16, u32, u8); 4] = [("aRow0", 0, F32, 4), ("aRow1", 1
 impl CityGpu {
     /// # Safety
     /// GXM is initialized; `vram` outlives the city.
-    pub unsafe fn load(p: &mut PackFile, gpu: &mut Gpu, vram: &mut Arena, msaa: u32, shadow_unit: f32, mut progress: impl FnMut(&str)) -> Result<CityGpu, String> {
+    pub unsafe fn load(p: &mut PackFile, gpu: &mut Gpu, vram: &mut Arena, msaa: u32, shadow_unit: f32, extra: &str, mut progress: impl FnMut(&str)) -> Result<CityGpu, String> {
         let city: City = pack::read(&p.read(pack::CITY)?, 0).ok_or("city record")?;
         let cells: Vec<Cell> = pack::table(&p.read(pack::CELL)?);
         let blocks: Vec<Block> = pack::table(&p.read(pack::BLCK)?);
@@ -239,7 +275,7 @@ impl CityGpu {
         let models: Vec<Model> = pack::table(&p.read(pack::MODL)?);
 
         progress("Preparing programs");
-        let defines = scene_defines(shadow_unit);
+        let defines = scene_defines(shadow_unit, extra);
         let opaque = [Blend::Opaque, Blend::Alpha];
         let wall_stream = [Stream { stride: 20, instanced: false, attrs: &WALL_ATTRS }];
         let solid_stream = [Stream { stride: 20, instanced: false, attrs: &SOLID_ATTRS }];
@@ -369,7 +405,7 @@ impl CityGpu {
     ///
     /// # Safety
     /// Inside a scene on `ctx`.
-    pub unsafe fn draw(&mut self, ctx: *mut g::SceGxmContext, vp: &Mat4, eye: V3, frame: &[f32; 16], look: &[f32; 12], night: bool, shadow: &g::SceGxmTexture, show: &Show, frame_no: u32) -> Stats {
+    pub unsafe fn draw(&mut self, ctx: *mut g::SceGxmContext, vp: &Mat4, eye: V3, frame: &Frame, look: &[f32; 12], haze: &Haze, night: bool, shadow: &g::SceGxmTexture, show: &Show, frame_no: u32) -> Stats {
         let planes = mat::planes(vp);
         let mut stats = Stats::default();
         let mut items = core::mem::take(&mut self.items);
@@ -469,23 +505,36 @@ impl CityGpu {
                 current = Some((b.kind, b.tex));
             }
             let v = Uniforms::vertex(ctx);
-            v.set(pass.frame, frame);
             v.set(pass.lamp_map, &self.lamp_map);
-            let f = Uniforms::fragment(ctx);
+            if matches!(b.kind, kind::WALL | kind::GROUND | kind::PICTURE | kind::PICTURE_INST) {
+                let g = self.texs.get(b.tex as usize).map(|e| e.gloss).unwrap_or([204, 0, 0, 0]);
+                v.set(pass.gloss, &[g[0] as f32 / 255.0, g[1] as f32 / 255.0, 0.0, 0.0]);
+            }
+            let mut l = *look;
             if b.kind == kind::WALL {
                 // The night page holds its emission over its scale; with no night page, nothing glows.
                 let night_tex = self.texs.get(b.tex as usize).map(|e| e.night).unwrap_or(NO_TEX);
                 let scale = self.texs.get(night_tex as usize).map(|e| e.metres).unwrap_or(0.0);
-                let mut l = *look;
-                l[3] = frame[11] * scale;
-                f.set(pass.look, &l);
+                l[7] = frame[11] * scale;
             } else if matches!(b.kind, kind::PICTURE | kind::PICTURE_INST) {
-                let mut l = *look;
-                l[3] = self.texs.get(b.tex as usize).map(|e| e.metres).unwrap_or(1.0);
-                f.set(pass.look, &l);
-            } else {
-                f.set(pass.look, look);
+                l[7] = self.texs.get(b.tex as usize).map(|e| e.metres).unwrap_or(1.0);
             }
+            // The haze in the draw's direction: its middle; an instanced draw's, its cell's (or ahead).
+            let middle = if !kind::instanced(b.kind) {
+                V3 { x: b.origin[0] + b.span[0] * 0.5, y: 0.0, z: b.origin[2] + b.span[2] * 0.5 }
+            } else if it.cell != RESIDENT {
+                let c = &self.cells[it.cell as usize];
+                V3 { x: (c.min[0] + c.max[0]) * 0.5, y: 0.0, z: (c.min[2] + c.max[2]) * 0.5 }
+            } else {
+                haze.eye
+            };
+            let hc = haze.towards(middle);
+            l[9..12].copy_from_slice(&hc);
+            Uniforms::fragment(ctx).set(pass.look, &l);
+            // The haze's density to the draw's middle height.
+            let mut fr = *frame;
+            fr[3] = haze.density_to(b.origin[1] + b.span[1] * 0.5);
+            v.set(pass.frame, &fr);
             if kind::instanced(b.kind) {
                 v.set(pass.vp, vp);
                 v.set(pass.bx, &[b.origin[0], b.origin[1], b.origin[2], 0.0, b.span[0], b.span[1], b.span[2], 0.0]);
@@ -530,7 +579,7 @@ impl CityGpu {
     ///
     /// # Safety
     /// Inside a scene on `ctx`, after `draw` this frame.
-    pub unsafe fn draw_models(&mut self, ctx: *mut g::SceGxmContext, vp: &Mat4, frame: &[f32; 16], look: &[f32; 12], shadow: &g::SceGxmTexture, placed: &mut Vec<(usize, Instance)>) -> u32 {
+    pub unsafe fn draw_models(&mut self, ctx: *mut g::SceGxmContext, vp: &Mat4, frame: &Frame, look: &[f32; 12], haze: &Haze, shadow: &g::SceGxmTexture, placed: &mut Vec<(usize, Instance)>) -> u32 {
         self.ring.next_frame();
         placed.sort_by_key(|p| p.0);
         placed.truncate(MODEL_INSTANCES);
@@ -551,10 +600,15 @@ impl CityGpu {
                 pass.bind(ctx, shadow, &self.lamp);
                 gpu::state_opaque(ctx, if b.kind == kind::OPEN_INST { Cull::None } else { Cull::Cw });
                 let v = Uniforms::vertex(ctx);
-                v.set(pass.frame, frame);
                 v.set(pass.vp, vp);
                 v.set(pass.bx, &[b.origin[0], b.origin[1], b.origin[2], 0.0, b.span[0], b.span[1], b.span[2], 0.0]);
-                Uniforms::fragment(ctx).set(pass.look, look);
+                let mut l = *look;
+                let r = &placed[at].1.rows;
+                l[9..12].copy_from_slice(&haze.towards(V3 { x: r[0][3], y: r[1][3], z: r[2][3] }));
+                Uniforms::fragment(ctx).set(pass.look, &l);
+                let mut fr = *frame;
+                fr[3] = haze.density_to(r[1][3]);
+                v.set(pass.frame, &fr);
                 g::sceGxmSetVertexStream(ctx, 0, self.own.solids.add(b.vtx_first as usize * 20).cast());
                 g::sceGxmSetVertexStream(ctx, 1, buf.cast());
                 g::sceGxmDrawInstanced(ctx, g::SceGxmPrimitiveType_SCE_GXM_PRIMITIVE_TRIANGLES, g::SceGxmIndexFormat_SCE_GXM_INDEX_FORMAT_U16, self.own.indices.add(b.idx_first as usize).cast(), b.idx_count * n as u32, b.idx_count);

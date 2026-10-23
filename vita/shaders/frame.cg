@@ -1,30 +1,77 @@
 // What every scene program takes per frame, as one array (uFrame):
-//   [0] xyz  towards the sun (or the moon); w: haze per metre (the reference's FogExp2 density)
-//   [1] rgb  light from the sky over LIGHT_SCALE; w: how bright what glows by night is (0 by day)
-//   [2] rgb  light from the ground over LIGHT_SCALE; w: how bright the rooms are (the hour's interiorGlow)
+//   [0] xyz  towards the sun (or the moon); w: haze per metre, at the draw's height (`uHaze`)
+//   [1] rgb  light from the sky over LIGHT_SCALE (linear); w: how bright what glows by night is (0 by day)
+//   [2] rgb  light from the ground over LIGHT_SCALE (linear); w: how bright the rooms are (the hour's interiorGlow)
 //   [3] x    most haze a point can be under; y: from world x and z to the shadow window's texture coordinates (a
 //            scale), zw: their offsets
-// The light and the tint travel to the fragments as colours, which the scene's parameter buffer keeps in a few
-// bytes; a colour holds 0..1, so the light is carried at 1 / LIGHT_SCALE and the sun's colour stays a fragment
-// uniform (uLook[1]).
+//   [4] xyz  the eye
+//   [5] rgb  the sky a surface reflects (linear)
+// And per draw in the fragment programs (uLook): [0] the hour's tone curve (a, b, c, d); [1] rgb: the sun over
+// LIGHT_SCALE (linear), a: what the draw's picture is over (its scale); [2] x: the lamps' light, yzw: the haze's
+// colour in the draw's direction, as the display shows it.
+//
+// Light is linear, as the reference lights; a fragment ends with the tone curve the export fitted to the
+// reference's grade and ACES for the hour, y = x(ax + b) / (x(cx + d) + 1) as the display shows it, then the
+// haze. Pictures and probed colours are sRGB: their square is near enough their linear value. The light travels to
+// the fragments as a colour, which holds 0..1: it is carried at 1 / LIGHT_SCALE, and the sun's colour stays a
+// fragment uniform.
 
-// How much of the haze colour a point takes, by its depth: FogExp2, 1 - exp(-(d x)²), near enough.
-float haze_of(float depth, float4 frame[4])
+// How much haze lies over a point `depth` from the eye: the reference's aerial fog, FogExp2 (1 − exp(−(d x)²) near
+// enough) through a layer that thins with height, its density the mean between the eye's height and the draw's
+// middle (the caller's, per draw, in uFrame[0].w).
+float haze_of(float3 world, float depth, float4 frame[6])
 {
-    float x = depth * frame[0].w;
-    float x2 = x * x;
-    return min(1.0 - 1.0 / (1.0 + x2 + 0.5 * x2 * x2), frame[3].x);
+    float t = frame[0].w * depth;
+    t *= t;
+#ifdef PROBE_NO_HAZE
+    return 0.0;
+#endif
+    return min(1.0 - 1.0 / (1.0 + t + 0.5 * t * t), frame[3].x);
+}
+
+// What a surface reflects of the sky (the reference's environment light) by how the eye sees it, Schlick's
+// Fresnel as roughness damps it (Lagarde): `gloss` its roughness and metalness. Low in the streets a reflection that
+// does not climb steeply meets the buildings across, which are dim (the reference's screen-space reflections show
+// them); a roof high up sees more of the sky. rgb: the light it reflects, linear; a: how much of its own colour it
+// shows lit (1 − metalness).
+half4 reflection(float3 world, float3 n, float2 gloss, float4 frame[6])
+{
+    float3 to = frame[4].xyz - world;
+    float3 v = to * rsqrt(dot(to, to));
+    float nv = saturate(dot(n, v));
+    float ry = 2.0 * nv * n.y - v.y;
+    float open = saturate(ry * 2.5 + world.y * (1.0 / 120.0));
+    float3 env = lerp(frame[2].rgb * (LIGHT_SCALE * 0.15), frame[5].rgb, open);
+    float f0 = lerp(0.04, 0.3, gloss.y);
+    float k = 1.0 - nv;
+    float k2 = k * k;
+    float f = f0 + (max(1.0 - gloss.x, f0) - f0) * (k2 * k2 * k);
+#ifdef PROBE_NO_SPEC
+    return half4(0.0, 0.0, 0.0, 1.0);
+#endif
+    return half4(env * f, 1.0 - gloss.y);
 }
 
 // Light on a face from the sky and the ground, by which way it looks.
-float3 hemi(float3 n, float4 frame[4])
+float3 hemi(float3 n, float4 frame[6])
 {
     return lerp(frame[2].rgb, frame[1].rgb, n.y * 0.5 + 0.5);
 }
 
 // Where a point reads the shadow window: a little way out along its normal, so that a wall does not read its own
 // building's top.
-float2 shadow_map(float3 world, float3 n, float4 frame[4])
+float2 shadow_map(float3 world, float3 n, float4 frame[6])
 {
     return (world.xz + n.xz * SHADOW_OUT) * frame[3].y + frame[3].zw;
+}
+
+// Linear light to what the display shows, under `haze` of the draw's haze.
+half3 shown(half3 c, half haze, float4 look[3])
+{
+#ifdef PROBE_NO_TONE
+    half3 t = c;
+#else
+    half3 t = c * ((half)look[0].x * c + (half)look[0].y) / (c * ((half)look[0].z * c + (half)look[0].w) + 1.0);
+#endif
+    return lerp(t, (half3)look[2].yzw, haze);
 }
