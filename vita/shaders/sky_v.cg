@@ -1,0 +1,22 @@
+// The sky: a dome of a few hundred triangles around the eye, coloured at its vertices.
+// uSky: [0] the haze at the horizon, [1] the zenith, [2] towards the sun, [3] the glow around the sun.
+
+void main(
+    float3 aPosition,
+    uniform float4x4 uMvp,
+    uniform float4 uSky[4],
+    out float4 oPosition : POSITION,
+    out float3 oColor : TEXCOORD0)
+{
+    float4 p = mul(uMvp, float4(aPosition, 1.0));
+    // At the far plane, whatever the dome's radius.
+    oPosition = float4(p.xy, p.w, p.w);
+    float up = saturate(aPosition.y);
+    float s = saturate(dot(aPosition, uSky[2].xyz));
+    float s2 = s * s;
+    float s8 = s2 * s2 * s2 * s2;
+    float s64 = s8 * s8 * s8 * s8 * s8 * s8 * s8 * s8;
+    // Below the horizon lies the land beyond the city, under the same haze.
+    float down = saturate(-aPosition.y * 3.0);
+    oColor = lerp(uSky[0].rgb, uSky[1].rgb, sqrt(up)) * (1.0 - 0.3 * down) + uSky[3].rgb * (s8 * 0.18 + s64 * 0.35) * (1.0 - down);
+}

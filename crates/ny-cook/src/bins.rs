@@ -128,6 +128,30 @@ impl Bins {
     }
 }
 
+/// Vertices, indices and instances: the pack's own (resident on a device), or one cell's record of `NEAR`.
+#[derive(Default)]
+pub struct Streams {
+    pub walls: Vec<WallVertex>,
+    pub solids: Vec<SolidVertex>,
+    pub grounds: Vec<GroundVertex>,
+    pub indices: Vec<u16>,
+    pub instances: Vec<Instance>,
+}
+
+impl Streams {
+    /// The record of `NEAR` these streams make, and its entry.
+    fn record(&self) -> (Vec<u8>, pack::NearCell) {
+        let parts: [&[u8]; 5] = [pack::slice_bytes(&self.solids), pack::slice_bytes(&self.walls), pack::slice_bytes(&self.grounds), pack::slice_bytes(&self.indices), pack::slice_bytes(&self.instances)];
+        let mut out = Vec::new();
+        for p in parts {
+            out.extend_from_slice(p);
+            out.resize((out.len() + 15) & !15, 0);
+        }
+        let entry = pack::NearCell { offset: 0, size: out.len() as u32, parts: parts.map(|p| p.len() as u32), pad: 0 };
+        (out, entry)
+    }
+}
+
 /// The pack's tables and streams.
 #[derive(Default)]
 pub struct Written {
@@ -135,12 +159,11 @@ pub struct Written {
     pub blocks: Vec<pack::Block>,
     pub regions: Vec<pack::Region>,
     pub batches: Vec<Batch>,
-    pub walls: Vec<WallVertex>,
-    pub solids: Vec<SolidVertex>,
-    pub grounds: Vec<GroundVertex>,
-    pub indices: Vec<u16>,
-    pub instances: Vec<Instance>,
     pub spans: Vec<u32>,
+    /// The resident streams: shapes, the mid and far levels.
+    pub own: Streams,
+    pub near_cells: Vec<pack::NearCell>,
+    pub near: Vec<u8>,
 }
 
 fn quantize(p: [f32; 3], origin: [f32; 3], span: [f32; 3]) -> [u16; 3] {
@@ -154,9 +177,10 @@ fn spans_of(sorted: &[u8], subs: usize, unit: u32) -> Vec<u32> {
 }
 
 impl Written {
-    /// Cuts a bin into batches of at most 65 536 vertices and appends them; with `subs`, its triangles are ordered
-    /// by their sub and each batch gets a `SPAN` record.
-    fn put(&mut self, kind: u32, tex: u32, bin: &Bin, subs: usize) {
+    /// Cuts a bin into batches of at most 65 536 vertices and appends them, their data into `to` (the resident
+    /// streams when `None`); with `subs`, its triangles are ordered by their sub and each batch gets a `SPAN` record.
+    fn put(&mut self, to: Option<&mut Streams>, kind: u32, tex: u32, bin: &Bin, subs: usize) {
+        let mut to = to;
         // Triangles in the order of their sub.
         let mut order_t: Vec<usize> = (0..bin.idx.len() / 3).collect();
         if subs > 0 {
@@ -193,10 +217,14 @@ impl Written {
             }
             let origin = b.min;
             let span = geom::sub(b.max, b.min).map(|s| s.max(1e-3));
+            let st: &mut Streams = match to.as_deref_mut() {
+                Some(s) => s,
+                None => &mut self.own,
+            };
             let vtx_first = match kind {
-                pack::kind::WALL => self.walls.len(),
-                pack::kind::GROUND => self.grounds.len(),
-                _ => self.solids.len(),
+                pack::kind::WALL => st.walls.len(),
+                pack::kind::GROUND => st.grounds.len(),
+                _ => st.solids.len(),
             } as u32;
             for &i in &order {
                 let v = &bin.verts[i as usize];
@@ -204,14 +232,14 @@ impl Written {
                 match kind {
                     pack::kind::WALL => {
                         let q = |x: f32| (x / pack::UV_RANGE * 32767.0).round().clamp(-32767.0, 32767.0) as i16;
-                        self.walls.push(WallVertex { pos, normal: v.n, ao: v.ao, uv: [q(v.uv[0]), q(v.uv[1])], tint: v.a, pad: [0; 2] });
+                        st.walls.push(WallVertex { pos, normal: v.n, ao: v.ao, uv: [q(v.uv[0]), q(v.uv[1])], tint: v.a, pad: [0; 2] });
                     }
-                    pack::kind::GROUND => self.grounds.push(GroundVertex { pos, normal: v.n, ao: v.ao, tint: v.a, pad: [0; 2] }),
-                    _ => self.solids.push(SolidVertex { pos, normal: v.n, ao: v.ao, color: v.a, glow: v.b, pad: [0; 2] }),
+                    pack::kind::GROUND => st.grounds.push(GroundVertex { pos, normal: v.n, ao: v.ao, tint: v.a, pad: [0; 2] }),
+                    _ => st.solids.push(SolidVertex { pos, normal: v.n, ao: v.ao, color: v.a, glow: v.b, pad: [0; 2] }),
                 }
             }
-            let idx_first = self.indices.len() as u32;
-            self.indices.extend(local.iter().map(|&i| i as u16));
+            let idx_first = st.indices.len() as u32;
+            st.indices.extend(local.iter().map(|&i| i as u16));
             let spans = if subs > 0 {
                 let at = self.spans.len() as u32;
                 self.spans.extend(spans_of(&subs_here, subs, 3));
@@ -238,7 +266,7 @@ impl Written {
         let mut shape_batch: Vec<Batch> = Vec::with_capacity(bins.shapes.len());
         for s in &bins.shapes {
             let before = w.batches.len();
-            w.put(pack::kind::SOLID, pack::NO_TEX, &s.bin, 0);
+            w.put(None, pack::kind::SOLID, pack::NO_TEX, &s.bin, 0);
             assert_eq!(w.batches.len(), before + 1, "a shape must fit one batch");
             shape_batch.push(w.batches.pop().unwrap());
         }
@@ -252,12 +280,12 @@ impl Written {
         for (k, b) in &bins.inst {
             inst_by_place[k.0 as usize].entry(k.1).or_default().push((k, b));
         }
-        let put_all = |w: &mut Written, lod: usize, place: u32, bounds: &mut Aabb| -> Draws {
+        let put_all = |w: &mut Written, mut to: Option<&mut Streams>, lod: usize, place: u32, bounds: &mut Aabb| -> Draws {
             let first = w.batches.len() as u32;
             let subs = subs_of(lod);
             if let Some(list) = by_place[lod].get(&place) {
                 for (k, b) in list {
-                    w.put(k.2, k.3, b, subs);
+                    w.put(to.as_deref_mut(), k.2, k.3, b, subs);
                     if let Some(bb) = &b.bounds {
                         bounds.union(bb);
                     }
@@ -269,8 +297,13 @@ impl Written {
                     sorted.sort_by_key(|e| e.0);
                     let mut batch = shape_batch[k.3 as usize];
                     batch.kind = k.2;
-                    batch.inst_first = w.instances.len() as u32;
+                    let st: &mut Streams = match to.as_deref_mut() {
+                        Some(s) => s,
+                        None => &mut w.own,
+                    };
+                    batch.inst_first = st.instances.len() as u32;
                     batch.inst_count = sorted.len() as u32;
+                    st.instances.extend(sorted.iter().map(|e| e.1));
                     batch.spans = if subs > 0 {
                         let at = w.spans.len() as u32;
                         let keys: Vec<u8> = sorted.iter().map(|e| e.0).collect();
@@ -279,7 +312,6 @@ impl Written {
                     } else {
                         NO_SPANS
                     };
-                    w.instances.extend(sorted.iter().map(|e| e.1));
                     w.batches.push(batch);
                     if let Some(bb) = &b.bounds {
                         bounds.union(bb);
@@ -291,11 +323,22 @@ impl Written {
         for lod in 0..3 {
             for place in 0..counts[lod] as u32 {
                 let mut bounds = Aabb::EMPTY;
-                let draws = put_all(&mut w, lod, place, &mut bounds);
-                let detail = if lod == 0 { put_all(&mut w, DETAIL as usize, place, &mut bounds) } else { Draws::default() };
+                if lod == 0 {
+                    // A cell's near and detail levels: a record of their own.
+                    let mut cell = Streams::default();
+                    let draws = put_all(&mut w, Some(&mut cell), 0, place, &mut bounds);
+                    let detail = put_all(&mut w, Some(&mut cell), DETAIL as usize, place, &mut bounds);
+                    let (rec, mut entry) = cell.record();
+                    entry.offset = w.near.len() as u32;
+                    w.near.extend_from_slice(&rec);
+                    w.near_cells.push(entry);
+                    let (min, max) = if bounds.is_empty() { ([0.0; 3], [0.0; 3]) } else { (bounds.min, bounds.max) };
+                    w.cells.push(pack::Cell { min, max, near: draws, detail });
+                    continue;
+                }
+                let draws = put_all(&mut w, None, lod, place, &mut bounds);
                 let (min, max) = if bounds.is_empty() { ([0.0; 3], [0.0; 3]) } else { (bounds.min, bounds.max) };
                 match lod {
-                    0 => w.cells.push(pack::Cell { min, max, near: draws, detail }),
                     1 => w.blocks.push(pack::Block { min, max, mid: draws }),
                     _ => w.regions.push(pack::Region { min, max, far: draws }),
                 }

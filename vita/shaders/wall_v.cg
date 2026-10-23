@@ -1,0 +1,20 @@
+// Walls of facade boxes: the facade pages, tinted, lit.
+
+void main(
+    float3 aPosition,
+    float3 aNormal,
+    float aAo,
+    float2 aUv,
+    float4 aTint,
+    uniform float4x4 uMvp,
+    uniform float4 uFrame[4],
+    out float4 oPosition : POSITION,
+    out float2 oUv : TEXCOORD0,
+    out float4 oLight : COLOR0,
+    out float4 oTint : COLOR1)
+{
+    oPosition = mul(uMvp, float4(aPosition, 1.0));
+    oUv = aUv * UV_RANGE;
+    oLight = float4(hemi(aNormal, uFrame) * aAo, max(dot(aNormal, uFrame[0].xyz), 0.0));
+    oTint = float4(aTint.rgb * 2.0, haze_of(oPosition.w, uFrame));
+}

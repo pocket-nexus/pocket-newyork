@@ -29,13 +29,17 @@ pub struct Reach {
     pub mid: f32,
 }
 
-/// A draw: a batch, and the range of its indices (or, for an instanced batch, of its instances) to draw.
+/// A draw: a batch, and the range of its indices (or, for an instanced batch, of its instances) to draw. `cell`:
+/// the cell whose record of `NEAR` holds its data, `RESIDENT` for the pack's own streams.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Item {
     pub batch: u32,
     pub from: u32,
     pub to: u32,
+    pub cell: u32,
 }
+
+pub const RESIDENT: u32 = u32::MAX;
 
 /// Places drawn at each level: near cells, mid blocks, far regions, detail cells.
 #[derive(Clone, Copy, Debug, Default)]
@@ -101,23 +105,25 @@ fn runs(t: &Tables, first: u32, count: u32, chosen: &[bool], out: &mut Vec<Item>
             }
             let (from, to) = (s[start], s[k]);
             if to > from {
-                out.push(Item { batch: bi, from, to });
+                out.push(Item { batch: bi, from, to, cell: RESIDENT });
             }
         }
     }
 }
 
-fn all(t: &Tables, first: u32, count: u32, out: &mut Vec<Item>) {
+fn all(t: &Tables, first: u32, count: u32, cell: u32, out: &mut Vec<Item>) {
     for bi in first..first + count {
         let w = whole(&t.batches[bi as usize]);
         if w > 0 {
-            out.push(Item { batch: bi, from: 0, to: w });
+            out.push(Item { batch: bi, from: 0, to: w, cell });
         }
     }
 }
 
-/// Chooses this frame's draws.
-pub fn select(t: &Tables, planes: &Planes, eye: [f32; 3], reach: &Reach, out: &mut Vec<Item>) -> Counts {
+/// Chooses this frame's draws. `ready(cell)`: whether a cell's record of `NEAR` is in memory; a cell within the
+/// near reach whose record is not is drawn at the mid level, and `wanted` hears of it (with its distance), so the
+/// runtime reads it.
+pub fn select(t: &Tables, planes: &Planes, eye: [f32; 3], reach: &Reach, ready: &dyn Fn(u32) -> bool, wanted: &mut dyn FnMut(u32, f32), out: &mut Vec<Item>) -> Counts {
     let c = t.city;
     let mut counts = Counts::default();
     let (bc, rb) = (c.block_cells, c.region_blocks);
@@ -135,7 +141,7 @@ pub fn select(t: &Tables, planes: &Planes, eye: [f32; 3], reach: &Reach, out: &m
             if dist(eye, rmin, rmax) >= reach.mid {
                 if r.far.count > 0 {
                     counts.places[2] += 1;
-                    all(t, r.far.first, r.far.count, out);
+                    all(t, r.far.first, r.far.count, RESIDENT, out);
                 }
                 continue;
             }
@@ -162,7 +168,7 @@ pub fn select(t: &Tables, planes: &Planes, eye: [f32; 3], reach: &Reach, out: &m
                     if d >= reach.near {
                         if block.mid.count > 0 {
                             counts.places[1] += 1;
-                            all(t, block.mid.first, block.mid.count, out);
+                            all(t, block.mid.first, block.mid.count, RESIDENT, out);
                         }
                         continue;
                     }
@@ -182,15 +188,27 @@ pub fn select(t: &Tables, planes: &Planes, eye: [f32; 3], reach: &Reach, out: &m
                                 any_mid = true;
                                 continue;
                             }
-                            let cell = &t.cells[(cz * c.cells_x + cx) as usize];
-                            if cell.near.count + cell.detail.count == 0 || !visible(planes, cell.min, cell.max) {
+                            let ci_ = cz * c.cells_x + cx;
+                            let cell = &t.cells[ci_ as usize];
+                            if cell.near.count + cell.detail.count == 0 {
+                                mid_cells[(cj * bc + ci) as usize] = true;
+                                any_mid = true;
+                                continue;
+                            }
+                            if !ready(ci_) {
+                                wanted(ci_, dc);
+                                mid_cells[(cj * bc + ci) as usize] = true;
+                                any_mid = true;
+                                continue;
+                            }
+                            if !visible(planes, cell.min, cell.max) {
                                 continue;
                             }
                             counts.places[0] += 1;
-                            all(t, cell.near.first, cell.near.count, out);
+                            all(t, cell.near.first, cell.near.count, ci_, out);
                             if dc < reach.detail && cell.detail.count > 0 {
                                 counts.places[3] += 1;
-                                all(t, cell.detail.first, cell.detail.count, out);
+                                all(t, cell.detail.first, cell.detail.count, ci_, out);
                             }
                         }
                     }
@@ -229,6 +247,6 @@ mod tests {
         let t = Tables { city: &city, cells: &[], blocks: &[], regions: &[], batches: &batches, spans: &spans };
         let mut out = Vec::new();
         runs(&t, 0, 1, &[true, true, false, true], &mut out);
-        assert_eq!(out, [Item { batch: 0, from: 0, to: 9 }, Item { batch: 0, from: 27, to: 30 }]);
+        assert_eq!(out, [Item { batch: 0, from: 0, to: 9, cell: RESIDENT }, Item { batch: 0, from: 27, to: 30, cell: RESIDENT }]);
     }
 }

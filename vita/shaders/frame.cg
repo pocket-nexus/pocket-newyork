@@ -1,0 +1,22 @@
+// What every scene program takes per frame, as one array (uFrame):
+//   [0] xyz  towards the sun (or the moon); w: haze per metre (the reference's FogExp2 density)
+//   [1] rgb  light from the sky over LIGHT_SCALE; w: how bright what glows by night is (0 by day)
+//   [2] rgb  light from the ground over LIGHT_SCALE; w: how bright the rooms are (the hour's interiorGlow)
+//   [3] x    most haze a point can be under
+// The light and the tint travel to the fragments as colours, which the scene's parameter buffer keeps in a few
+// bytes; a colour holds 0..1, so the light is carried at 1 / LIGHT_SCALE and the sun's colour stays a fragment
+// uniform (uLook[1]).
+
+// How much of the haze colour a point takes, by its depth: FogExp2, 1 - exp(-(d x)²), near enough.
+float haze_of(float depth, float4 frame[4])
+{
+    float x = depth * frame[0].w;
+    float x2 = x * x;
+    return min(1.0 - 1.0 / (1.0 + x2 + 0.5 * x2 * x2), frame[3].x);
+}
+
+// Light on a face from the sky and the ground, by which way it looks.
+float3 hemi(float3 n, float4 frame[4])
+{
+    return lerp(frame[2].rgb, frame[1].rgb, n.y * 0.5 + 0.5);
+}

@@ -23,6 +23,8 @@
 //! | `VGND` | `GroundVertex` records: surfaces under a picture that repeats over the ground |
 //! | `IDX0` | `u16` indices, relative to each batch's first vertex |
 //! | `INST` | `Instance` records of instanced batches |
+//! | `NCEL` | `NearCell` table, one per cell: where its record of `NEAR` is |
+//! | `NEAR` | per cell, the vertices, indices and instances its near and detail batches draw, read when the eye comes near |
 //! | `SPAN` | `u32` offsets: per mid batch, where each of its block's cells starts in its indices (or instances), and the end (`City::block_cells² + 1`); per far batch the same for its region's blocks |
 //! | `TEXS` | `TexEntry` table |
 //! | `TDAT` | the pictures' levels, largest first, as `TexEntry` says |
@@ -39,7 +41,7 @@ use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
 pub const MAGIC: u32 = u32::from_le_bytes(*b"NYPK");
-pub const VERSION: u32 = 4;
+pub const VERSION: u32 = 5;
 
 pub const fn tag(t: &[u8; 4]) -> u32 {
     u32::from_le_bytes(*t)
@@ -56,6 +58,8 @@ pub const VGND: u32 = tag(b"VGND");
 pub const IDX0: u32 = tag(b"IDX0");
 pub const INST: u32 = tag(b"INST");
 pub const SPAN: u32 = tag(b"SPAN");
+pub const NCEL: u32 = tag(b"NCEL");
+pub const NEAR: u32 = tag(b"NEAR");
 pub const TEXS: u32 = tag(b"TEXS");
 pub const TDAT: u32 = tag(b"TDAT");
 pub const PRST: u32 = tag(b"PRST");
@@ -138,6 +142,33 @@ pub struct Cell {
     pub max: [f32; 3],
     pub near: Draws,
     pub detail: Draws,
+}
+
+/// A cell's record of `NEAR`: `offset` and `size` in the section, and the bytes of its parts in the order they are
+/// stored, each from a 16-byte boundary: solid vertices, wall vertices, ground vertices, indices, instances. A near
+/// or detail batch counts its vertices, indices and instances from the start of its cell's parts; an instanced one
+/// draws a shape whose vertices and indices are in the pack's own streams (`VSOL`, `IDX0`), and its instances are
+/// the cell's.
+#[derive(Clone, Copy, Debug, Default)]
+#[repr(C)]
+pub struct NearCell {
+    pub offset: u32,
+    pub size: u32,
+    pub parts: [u32; 5],
+    pub pad: u32,
+}
+
+impl NearCell {
+    /// Byte offset of each part within the record.
+    pub fn starts(&self) -> [usize; 5] {
+        let mut at = [0usize; 5];
+        let mut o = 0usize;
+        for k in 0..5 {
+            at[k] = o;
+            o = (o + self.parts[k] as usize + 15) & !15;
+        }
+        at
+    }
 }
 
 /// `City::block_cells` squared cells at the mid level.
@@ -400,6 +431,7 @@ mod tests {
         assert_eq!(core::mem::size_of::<Instance>(), 52);
         assert_eq!(core::mem::size_of::<TexEntry>(), 32);
         assert_eq!(core::mem::size_of::<Cell>(), 40);
+        assert_eq!(core::mem::size_of::<NearCell>(), 32);
     }
 
     #[test]

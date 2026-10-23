@@ -1,0 +1,9 @@
+// [0] rgb: the haze. [1] rgb: the sun
+uniform float4 uLook[2];
+
+half4 main(half4 vLight : COLOR0, half4 vColor : COLOR1, half4 vGlow : TEXCOORD0) : COLOR
+{
+    half3 c = vColor.rgb * (vLight.rgb + (half3)uLook[1].rgb * vLight.a) * (half)LIGHT_SCALE + vGlow.rgb;
+    c = lerp(c, (half3)uLook[0].rgb, vColor.a);
+    return half4(c, 1.0);
+}

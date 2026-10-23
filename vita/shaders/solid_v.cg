@@ -1,0 +1,28 @@
+// Geometry coloured by vertex, as the reference's materials coloured each vertex (the export's probe).
+
+void main(
+    float3 aPosition,
+    float3 aNormal,
+    float aAo,
+    float4 aColor,
+    float4 aGlow,
+    uniform float4x4 uMvp,
+    uniform float4 uFrame[4],
+    out float4 oPosition : POSITION,
+    out float4 oLight : COLOR0,
+    out float4 oColor : COLOR1,
+    out float4 oGlow : TEXCOORD0)
+{
+    oPosition = mul(uMvp, float4(aPosition, 1.0));
+#ifdef OPEN
+    // Seen from both sides: lit by the side that faces the light.
+    float sun = abs(dot(aNormal, uFrame[0].xyz)) * 0.8 + 0.2;
+#else
+    float sun = max(dot(aNormal, uFrame[0].xyz), 0.0);
+#endif
+    oLight = float4(hemi(aNormal, uFrame) * aAo, sun);
+    oColor = float4(aColor.rgb, haze_of(oPosition.w, uFrame));
+    // What glows: by night (w of uFrame[1]), or always (alpha 1).
+    float on = lerp(uFrame[1].w, 1.0, step(0.99, aColor.a));
+    oGlow = float4(aGlow.rgb * (aGlow.a * GLOW_RANGE * on), 0.0);
+}

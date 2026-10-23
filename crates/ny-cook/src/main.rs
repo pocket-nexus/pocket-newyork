@@ -385,12 +385,15 @@ fn main() {
     pw.add(pack::BLCK, pack::slice_bytes(&w.blocks).to_vec());
     pw.add(pack::REGN, pack::slice_bytes(&w.regions).to_vec());
     pw.add(pack::BTCH, pack::slice_bytes(&w.batches).to_vec());
-    pw.add(pack::VWAL, pack::slice_bytes(&w.walls).to_vec());
-    pw.add(pack::VSOL, pack::slice_bytes(&w.solids).to_vec());
-    pw.add(pack::VGND, pack::slice_bytes(&w.grounds).to_vec());
-    pw.add(pack::IDX0, pack::slice_bytes(&w.indices).to_vec());
-    pw.add(pack::INST, pack::slice_bytes(&w.instances).to_vec());
+    pw.add(pack::VWAL, pack::slice_bytes(&w.own.walls).to_vec());
+    pw.add(pack::VSOL, pack::slice_bytes(&w.own.solids).to_vec());
+    pw.add(pack::VGND, pack::slice_bytes(&w.own.grounds).to_vec());
+    pw.add(pack::IDX0, pack::slice_bytes(&w.own.indices).to_vec());
+    pw.add(pack::INST, pack::slice_bytes(&w.own.instances).to_vec());
+    pw.add(pack::NCEL, pack::slice_bytes(&w.near_cells).to_vec());
+    pw.add(pack::NEAR, w.near.clone());
     pw.add(pack::SPAN, pack::slice_bytes(&w.spans).to_vec());
+    pw.add(pack::PRST, pack::slice_bytes(&hours(&ir_dir)).to_vec());
     pw.add(pack::TEXS, pack::slice_bytes(&textures.entries).to_vec());
     pw.add(pack::TDAT, textures.data.clone());
     sim::add(&mut pw, &ir_dir).unwrap_or_else(|e| panic!("{e}"));
@@ -398,17 +401,18 @@ fn main() {
     std::fs::create_dir_all(out.parent().unwrap()).unwrap();
     std::fs::write(&out, &bytes).unwrap();
     eprintln!(
-        "pack: {:.1} MB ({} cells {}×{}, {} batches, {} solid / {} wall / {} ground vertices, {} indices, {} instances, {:.1} MB of pictures) in {:.1} s → {}",
+        "pack: {:.1} MB ({} cells {}×{}, {} batches; resident {} solid / {} wall vertices, {} indices, {} instances; {:.1} MB of cell records, largest {:.2} MB; {:.1} MB of pictures) in {:.1} s → {}",
         bytes.len() as f32 / 1e6,
         w.cells.len(),
         city.cells_x,
         city.cells_z,
         w.batches.len(),
-        w.solids.len(),
-        w.walls.len(),
-        w.grounds.len(),
-        w.indices.len(),
-        w.instances.len(),
+        w.own.solids.len(),
+        w.own.walls.len(),
+        w.own.indices.len(),
+        w.own.instances.len(),
+        w.near.len() as f32 / 1e6,
+        w.near_cells.iter().map(|c| c.size).max().unwrap_or(0) as f32 / 1e6,
         textures.data.len() as f32 / 1e6,
         t0.elapsed().as_secs_f32(),
         out.display()
@@ -530,4 +534,32 @@ fn mean_albedo(probe: Option<&ir::Probe>, inst: usize, verts: &[u32]) -> [f32; 3
     }
     let n = verts.len().max(1) as f32;
     s.map(|x| x / n)
+}
+
+/// The reference's hours, as the export read them back from its lighting (`world.json`), in `ny_sim::Hour` order.
+fn hours(ir: &std::path::Path) -> Vec<pack::Preset> {
+    let text = std::fs::read_to_string(ir.join("world.json")).unwrap_or_else(|e| panic!("world.json: {e}"));
+    let world: serde_json::Value = serde_json::from_str(&text).unwrap();
+    let v3 = |v: &serde_json::Value| [0, 1, 2].map(|k| v[k].as_f64().unwrap_or(0.0) as f32);
+    let f = |v: &serde_json::Value| v.as_f64().unwrap_or(0.0) as f32;
+    ["golden", "midday", "twilight", "midnight"]
+        .iter()
+        .map(|id| {
+            let h = world["hours"].as_array().unwrap().iter().find(|h| h["id"] == *id).unwrap_or_else(|| panic!("world.json has no hour {id}"));
+            pack::Preset {
+                sun_dir: v3(&h["sunDir"]),
+                sun: v3(&h["sun"]),
+                hemi_sky: v3(&h["hemiSky"]),
+                hemi_ground: v3(&h["hemiGround"]),
+                sky_top: v3(&h["skyTop"]),
+                sky_horizon: v3(&h["skyHorizon"]),
+                fog: v3(&h["fog"]),
+                fog_density: f(&h["fogDensity"]),
+                interior_glow: f(&h["interiorGlow"]),
+                night: f(&h["night"]),
+                exposure: f(&h["skyExposure"]),
+                pad: 0.0,
+            }
+        })
+        .collect()
 }

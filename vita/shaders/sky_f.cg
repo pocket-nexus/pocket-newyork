@@ -1,0 +1,4 @@
+half4 main(half3 vColor : TEXCOORD0) : COLOR
+{
+    return half4(vColor, 1.0);
+}
