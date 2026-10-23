@@ -2,7 +2,8 @@
 //   [0] xyz  towards the sun (or the moon); w: haze per metre (the reference's FogExp2 density)
 //   [1] rgb  light from the sky over LIGHT_SCALE; w: how bright what glows by night is (0 by day)
 //   [2] rgb  light from the ground over LIGHT_SCALE; w: how bright the rooms are (the hour's interiorGlow)
-//   [3] x    most haze a point can be under
+//   [3] x    most haze a point can be under; y: from world x and z to the shadow window's texture coordinates (a
+//            scale), zw: their offsets
 // The light and the tint travel to the fragments as colours, which the scene's parameter buffer keeps in a few
 // bytes; a colour holds 0..1, so the light is carried at 1 / LIGHT_SCALE and the sun's colour stays a fragment
 // uniform (uLook[1]).
@@ -19,4 +20,11 @@ float haze_of(float depth, float4 frame[4])
 float3 hemi(float3 n, float4 frame[4])
 {
     return lerp(frame[2].rgb, frame[1].rgb, n.y * 0.5 + 0.5);
+}
+
+// Where a point reads the shadow window: a little way out along its normal, so that a wall does not read its own
+// building's top.
+float2 shadow_map(float3 world, float3 n, float4 frame[4])
+{
+    return (world.xz + n.xz * SHADOW_OUT) * frame[3].y + frame[3].zw;
 }

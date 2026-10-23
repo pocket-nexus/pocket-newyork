@@ -20,6 +20,7 @@ import { probe } from './probe.js';
 import { exportWorld } from './world.js';
 import { bake } from './bake.js';
 import { exportSim } from './sim.js';
+import { exportModels } from './models.js';
 
 const params = new URLSearchParams(location.search);
 const ONLY = params.get('only');
@@ -150,6 +151,7 @@ async function main() {
   if (!ONLY || ONLY === 'bake') await bake(app);
   if (!ONLY || ONLY === 'map') await (await import('./map.js')).exportMap(app);
   if (!ONLY || ONLY === 'sim') await exportSim(app);
+  if (!ONLY || ONLY === 'models') await exportModels(app);
   if (!ONLY || ONLY === 'scene' || ONLY === 'probe') {
     const exported = await exportScene(app, ONLY !== 'probe');
     if (!ONLY || ONLY === 'probe') await probe(app, exported);

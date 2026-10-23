@@ -27,6 +27,7 @@ pub mod game;
 pub mod location;
 pub mod math;
 pub mod player;
+pub mod shadow;
 pub mod signal;
 pub mod traffic;
 pub mod world;

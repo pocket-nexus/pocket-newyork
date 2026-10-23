@@ -8,7 +8,8 @@ use pocket_vita_gxm::texture::{Format, Texture, Uploader, Wrap};
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 
-use ny_pack::{self as pack, kind, Batch, Block, Cell, City, NearCell, Region, TexEntry, NO_TEX};
+use ny_pack::{self as pack, kind, Batch, Block, Cell, City, Instance, Model, NearCell, Region, TexEntry, NO_TEX};
+use pocket_vita_gxm::mem::Ring;
 use ny_sim::math::V3;
 use ny_view::{Item, Reach, Tables, RESIDENT};
 use vita2d_sys as g;
@@ -28,6 +29,8 @@ const INST_V: &str = include_str!("../shaders/inst_v.cg");
 pub const LIGHT_SCALE: f32 = 2.0;
 /// Slots for cells' records (each as large as the largest record).
 const NEAR_SLOTS: usize = 72;
+/// Instances of models a frame may draw (every car of the traffic, and the player).
+pub const MODEL_INSTANCES: usize = 1024;
 
 /// A pack on storage: the section table, and reads of what a section holds.
 pub struct PackFile {
@@ -76,6 +79,12 @@ impl PackFile {
         Ok(())
     }
 
+    pub fn read_range(&mut self, tag: u32, at: usize, len: usize) -> Result<Vec<u8>, String> {
+        let mut bytes = vec![0u8; len];
+        unsafe { self.read_into(tag, at, bytes.as_mut_ptr(), len)? };
+        Ok(bytes)
+    }
+
     pub fn read(&mut self, tag: u32) -> Result<Vec<u8>, String> {
         let n = self.size(tag)?;
         let mut bytes = vec![0u8; n];
@@ -98,12 +107,21 @@ struct Pass {
     frame: Param,
     look: Param,
     units: [u32; 2],
+    shadow: Option<u32>,
 }
 
 impl Pass {
     unsafe fn new(prog: Program, pictures: [&str; 2]) -> Pass {
         let units = pictures.map(|name| if name.is_empty() { 0 } else { prog.fs.sampler_index(name).unwrap_or(0) });
-        Pass { mvp: prog.vs.param("uMvp"), vp: prog.vs.param("uVp"), bx: prog.vs.param("uBox"), frame: prog.vs.param("uFrame"), look: prog.fs.param("uLook"), units, prog }
+        Pass { mvp: prog.vs.param("uMvp"), vp: prog.vs.param("uVp"), bx: prog.vs.param("uBox"), frame: prog.vs.param("uFrame"), look: prog.fs.param("uLook"), units, shadow: prog.fs.sampler_index("uShadow"), prog }
+    }
+
+    /// Binds the program and the shadow window.
+    unsafe fn bind(&self, ctx: *mut g::SceGxmContext, shadow: &g::SceGxmTexture) {
+        self.prog.bind(ctx, false);
+        if let Some(unit) = self.shadow {
+            g::sceGxmSetFragmentTexture(ctx, unit, shadow);
+        }
     }
 }
 
@@ -155,14 +173,27 @@ pub struct CityGpu {
     inst_open: Pass,
     items: Vec<Item>,
     wanted: Vec<(u32, f32)>,
+    pub models: Vec<Model>,
+    /// This frame's instances of the models, in a ring of two frames.
+    ring: Ring,
     pub geometry_bytes: usize,
     pub texture_bytes: usize,
 }
 
 /// What every scene program is compiled with.
-pub fn scene_defines() -> String {
-    format!("#define UV_RANGE {:.1}\n#define LIGHT_SCALE {LIGHT_SCALE:.1}\n#define GLOW_RANGE {:.1}\n{FRAME}", pack::UV_RANGE, pack::GLOW_RANGE)
+/// (`shadow_unit`: metres of height in one unit of the shadow texture as a program reads it.)
+pub fn scene_defines(shadow_unit: f32) -> String {
+    format!(
+        "#define UV_RANGE {:.1}\n#define LIGHT_SCALE {LIGHT_SCALE:.1}\n#define GLOW_RANGE {:.1}\n#define SHADOW_UNIT {shadow_unit:.3}\n#define SHADOW_K {:.3}\n#define SHADOW_OUT {SHADOW_OUT:.1}\n{FRAME}",
+        pack::UV_RANGE,
+        pack::GLOW_RANGE,
+        1.0 / SHADOW_SOFT
+    )
 }
+
+/// Metres under the shadow height over which the sun's light goes out, and how far out from a surface it reads.
+const SHADOW_SOFT: f32 = 2.5;
+const SHADOW_OUT: f32 = 2.5;
 
 const WALL_ATTRS: [(&str, u16, u32, u8); 5] = [("aPosition", 0, U16N, 3), ("aNormal", 6, S8N, 3), ("aAo", 9, U8N, 1), ("aUv", 10, S16N, 2), ("aTint", 14, U8N, 4)];
 const SOLID_ATTRS: [(&str, u16, u32, u8); 5] = [("aPosition", 0, U16N, 3), ("aNormal", 6, S8N, 3), ("aAo", 9, U8N, 1), ("aColor", 10, U8N, 4), ("aGlow", 14, U8N, 4)];
@@ -171,7 +202,7 @@ const INST_ATTRS: [(&str, u16, u32, u8); 4] = [("aRow0", 0, F32, 4), ("aRow1", 1
 impl CityGpu {
     /// # Safety
     /// GXM is initialized; `vram` outlives the city.
-    pub unsafe fn load(p: &mut PackFile, gpu: &mut Gpu, vram: &mut Arena, msaa: u32, mut progress: impl FnMut(&str)) -> Result<CityGpu, String> {
+    pub unsafe fn load(p: &mut PackFile, gpu: &mut Gpu, vram: &mut Arena, msaa: u32, shadow_unit: f32, mut progress: impl FnMut(&str)) -> Result<CityGpu, String> {
         let city: City = pack::read(&p.read(pack::CITY)?, 0).ok_or("city record")?;
         let cells: Vec<Cell> = pack::table(&p.read(pack::CELL)?);
         let blocks: Vec<Block> = pack::table(&p.read(pack::BLCK)?);
@@ -180,9 +211,10 @@ impl CityGpu {
         let spans: Vec<u32> = pack::table(&p.read(pack::SPAN)?);
         let near_cells: Vec<NearCell> = pack::table(&p.read(pack::NCEL)?);
         let texs: Vec<TexEntry> = pack::table(&p.read(pack::TEXS)?);
+        let models: Vec<Model> = pack::table(&p.read(pack::MODL)?);
 
         progress("Preparing programs");
-        let defines = scene_defines();
+        let defines = scene_defines(shadow_unit);
         let opaque = [Blend::Opaque, Blend::Alpha];
         let wall_stream = [Stream { stride: 20, instanced: false, attrs: &WALL_ATTRS }];
         let solid_stream = [Stream { stride: 20, instanced: false, attrs: &SOLID_ATTRS }];
@@ -264,6 +296,8 @@ impl CityGpu {
             inst_open,
             items: Vec::with_capacity(4096),
             wanted: Vec::with_capacity(256),
+            models,
+            ring: Ring::new(MODEL_INSTANCES * 52 + 4096, 2)?,
             texture_bytes,
         })
     }
@@ -272,7 +306,7 @@ impl CityGpu {
     ///
     /// # Safety
     /// Inside a scene on `ctx`.
-    pub unsafe fn draw(&mut self, ctx: *mut g::SceGxmContext, vp: &Mat4, eye: V3, frame: &[f32; 16], look: &[f32; 8], night: bool, show: &Show, frame_no: u32) -> Stats {
+    pub unsafe fn draw(&mut self, ctx: *mut g::SceGxmContext, vp: &Mat4, eye: V3, frame: &[f32; 16], look: &[f32; 8], night: bool, shadow: &g::SceGxmTexture, show: &Show, frame_no: u32) -> Stats {
         let planes = mat::planes(vp);
         let mut stats = Stats::default();
         let mut items = core::mem::take(&mut self.items);
@@ -331,7 +365,7 @@ impl CityGpu {
                 _ => &self.inst_open,
             };
             if current.map(|c| c.0) != Some(b.kind) {
-                pass.prog.bind(ctx, false);
+                pass.bind(ctx, shadow);
                 gpu::state_opaque(ctx, if b.kind == kind::OPEN || b.kind == kind::OPEN_INST { Cull::None } else { Cull::Cw });
                 current = Some((b.kind, NO_TEX));
             }
@@ -370,6 +404,7 @@ impl CityGpu {
                 stats.tris[2] += b.idx_count / 3 * n;
             } else {
                 v.set(pass.mvp, &mat::with_bounds(vp, b.origin, b.span));
+                v.set(pass.bx, &[b.origin[0], b.origin[1], b.origin[2], 0.0, b.span[0], b.span[1], b.span[2], 0.0]);
                 let vb = if b.kind == kind::WALL { walls } else { solids };
                 gpu::draw(ctx, vb.add(b.vtx_first as usize * 20), indices.add((b.idx_first + it.from) as usize), it.to - it.from);
                 stats.tris[if b.kind == kind::WALL { 0 } else { 1 }] += (it.to - it.from) / 3;
@@ -380,4 +415,66 @@ impl CityGpu {
         self.wanted = wanted;
         stats
     }
+}
+
+impl CityGpu {
+    /// The model named `name`.
+    pub fn model(&self, name: &str) -> Option<usize> {
+        self.models.iter().position(|m| m.name() == name)
+    }
+
+    /// Draws models where the game puts them: `(model, instance)` pairs, any order.
+    ///
+    /// # Safety
+    /// Inside a scene on `ctx`, after `draw` this frame.
+    pub unsafe fn draw_models(&mut self, ctx: *mut g::SceGxmContext, vp: &Mat4, frame: &[f32; 16], look: &[f32; 8], shadow: &g::SceGxmTexture, placed: &mut Vec<(usize, Instance)>) -> u32 {
+        self.ring.next_frame();
+        placed.sort_by_key(|p| p.0);
+        placed.truncate(MODEL_INSTANCES);
+        let mut tris = 0;
+        let mut at = 0;
+        while at < placed.len() {
+            let m = placed[at].0;
+            let end = at + placed[at..].iter().take_while(|p| p.0 == m).count();
+            let n = end - at;
+            let Some(buf) = self.ring.alloc(n * 52, 16) else { break };
+            for (k, p) in placed[at..end].iter().enumerate() {
+                core::ptr::write_unaligned(buf.add(k * 52).cast::<Instance>(), p.1);
+            }
+            let model = self.models[m];
+            for bi in model.first..model.first + model.count {
+                let b = self.batches[bi as usize];
+                let pass = if b.kind == kind::OPEN_INST { &self.inst_open } else { &self.inst };
+                pass.bind(ctx, shadow);
+                gpu::state_opaque(ctx, if b.kind == kind::OPEN_INST { Cull::None } else { Cull::Cw });
+                let v = Uniforms::vertex(ctx);
+                v.set(pass.frame, frame);
+                v.set(pass.vp, vp);
+                v.set(pass.bx, &[b.origin[0], b.origin[1], b.origin[2], 0.0, b.span[0], b.span[1], b.span[2], 0.0]);
+                Uniforms::fragment(ctx).set(pass.look, look);
+                g::sceGxmSetVertexStream(ctx, 0, self.own.solids.add(b.vtx_first as usize * 20).cast());
+                g::sceGxmSetVertexStream(ctx, 1, buf.cast());
+                g::sceGxmDrawInstanced(ctx, g::SceGxmPrimitiveType_SCE_GXM_PRIMITIVE_TRIANGLES, g::SceGxmIndexFormat_SCE_GXM_INDEX_FORMAT_U16, self.own.indices.add(b.idx_first as usize).cast(), b.idx_count * n as u32, b.idx_count);
+                tris += b.idx_count / 3 * n as u32;
+            }
+            at = end;
+        }
+        tris
+    }
+}
+
+/// An instance at `(x, y, z)` turned by yaw (about y), then pitch (about x), then roll (about z), as three.js's
+/// 'YXZ' order composes them, with `tint` (linear, 1 = as the model has it).
+pub fn placed(x: f32, y: f32, z: f32, yaw: f32, pitch: f32, roll: f32, tint: [f32; 3]) -> Instance {
+    let (sy, cy) = (libm::sinf(yaw), libm::cosf(yaw));
+    let (sp, cp) = (libm::sinf(pitch), libm::cosf(pitch));
+    let (sr, cr) = (libm::sinf(roll), libm::cosf(roll));
+    // R = Ry · Rx · Rz
+    let r = [
+        [cy * cr + sy * sp * sr, -cy * sr + sy * sp * cr, sy * cp],
+        [cp * sr, cp * cr, -sp],
+        [-sy * cr + cy * sp * sr, sy * sr + cy * sp * cr, cy * cp],
+    ];
+    let t = tint.map(|c| (c * 128.0).round().clamp(0.0, 255.0) as u8);
+    Instance { rows: [[r[0][0], r[0][1], r[0][2], x], [r[1][0], r[1][1], r[1][2], y], [r[2][0], r[2][1], r[2][2], z]], tint: [t[0], t[1], t[2], 255] }
 }

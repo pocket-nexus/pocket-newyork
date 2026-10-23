@@ -4,7 +4,9 @@
 
 mod bins;
 mod facade;
+mod models;
 mod geom;
+mod heights;
 mod ir;
 mod tex;
 mod sim;
@@ -234,6 +236,16 @@ fn main() {
     };
     let mut bins = Bins::new(city);
 
+    // The heights the shadows are swept from: over Manhattan's buildings, with a margin.
+    let mut tops = Aabb::EMPTY;
+    for (oid, _, _, b) in &placed {
+        if classes[*oid] == Class::Facade {
+            tops.union(b);
+        }
+    }
+    let mut heights = heights::Grid::new([tops.min[0] - 300.0, tops.min[2] - 300.0], [tops.max[0] + 300.0, tops.max[2] + 300.0], 2.0, 0.125);
+    eprintln!("heights: {} × {} cells of {} m", heights.head.w, heights.head.h, heights.head.step);
+
     // Probed colours are read an object at a time.
     let mut probe_of: Option<(usize, Option<ir::Probe>)> = None;
     let mut attrs_cache: HashMap<(usize, String), Vec<f32>> = HashMap::new();
@@ -257,6 +269,21 @@ fn main() {
         let class = classes[*oid];
         // Across the rivers the city is seen from afar: no near level.
         let distant = o.path.starts_with("Boroughs/BoroughBuildings") || o.path.starts_with("Boroughs/BoroughIsland");
+        // What stands up casts shadows: a facade box by its footprint, anything else near by its triangles.
+        if class == Class::Facade {
+            let c = |x: f32, z: f32| {
+                let p = geom::point(m, [x, -0.5, z]);
+                [p[0], p[2]]
+            };
+            heights.footprint([c(-0.5, -0.5), c(0.5, -0.5), c(0.5, 0.5), c(-0.5, 0.5)], geom::point(m, [0.0, 0.5, 0.0])[1]);
+        } else if class == Class::Solid && !distant && radius >= profile.detail_radius && b.max[1] > 1.5 && b.radius() < 3000.0 {
+            for (_, tris) in &src.lods[0] {
+                for f in tris.chunks(3) {
+                    let p = |k: usize| geom::point(m, src.pos[f[k] as usize]);
+                    heights.triangle(p(0), p(1), p(2));
+                }
+            }
+        }
         if class == Class::Facade {
             facade_instance(&ir, o, *i, m, b, &facades, &textures, probe, &mut bins, &profile, &mut attrs_cache, &mut spend);
         }
@@ -324,6 +351,11 @@ fn main() {
                         if idx.is_empty() {
                             return (u32::MAX, [1.0; 3]);
                         }
+                        for v in &mut verts {
+                            if v.a[3] != pack::GLOW_ALWAYS {
+                                v.a[3] = pack::TINTED;
+                            }
+                        }
                         if let Some(c) = &colors {
                             for v in &mut verts {
                                 for k in 0..3 {
@@ -360,6 +392,7 @@ fn main() {
             }
         }
     }
+    let model_parts = models::shapes(&ir_dir, &mut bins).unwrap_or_else(|e| panic!("{e}"));
     let tris = bins.triangles();
     eprintln!("triangles: near {} mid {} far {} detail {}", tris[0], tris[1], tris[2], tris[3]);
     let mut spent: Vec<_> = spend.into_iter().collect();
@@ -370,7 +403,8 @@ fn main() {
         }
     }
 
-    let w = bins::Written::from_bins(&bins);
+    let mut w = bins::Written::from_bins(&bins);
+    let model_table = models::table(&model_parts, &mut w);
     let mut pw = pack::Writer::default();
     let meta = serde_json::json!({
         "name": "Pocket New York",
@@ -394,6 +428,8 @@ fn main() {
     pw.add(pack::NEAR, w.near.clone());
     pw.add(pack::SPAN, pack::slice_bytes(&w.spans).to_vec());
     pw.add(pack::PRST, pack::slice_bytes(&hours(&ir_dir)).to_vec());
+    pw.add(pack::MODL, pack::slice_bytes(&model_table).to_vec());
+    pw.add(pack::HMAP, heights.bytes());
     pw.add(pack::TEXS, pack::slice_bytes(&textures.entries).to_vec());
     pw.add(pack::TDAT, textures.data.clone());
     sim::add(&mut pw, &ir_dir).unwrap_or_else(|e| panic!("{e}"));

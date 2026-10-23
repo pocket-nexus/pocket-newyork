@@ -164,6 +164,8 @@ pub struct Written {
     pub own: Streams,
     pub near_cells: Vec<pack::NearCell>,
     pub near: Vec<u8>,
+    /// Every shape's batch, by shape id.
+    pub shape_batches: Vec<Batch>,
 }
 
 fn quantize(p: [f32; 3], origin: [f32; 3], span: [f32; 3]) -> [u16; 3] {
@@ -270,6 +272,7 @@ impl Written {
             assert_eq!(w.batches.len(), before + 1, "a shape must fit one batch");
             shape_batch.push(w.batches.pop().unwrap());
         }
+        w.shape_batches = shape_batch.clone();
         let mut by_place: [BTreeMap<u32, Vec<(&Key, &Bin)>>; 4] = Default::default();
         for (k, b) in &bins.map {
             if !b.idx.is_empty() {

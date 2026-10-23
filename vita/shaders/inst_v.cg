@@ -14,6 +14,8 @@ void main(
     uniform float4 uBox[2],
     uniform float4 uFrame[4],
     out float4 oPosition : POSITION,
+    out float2 oMap : TEXCOORD1,
+    out float oHeight : TEXCOORD2,
     out float4 oLight : COLOR0,
     out float4 oColor : COLOR1,
     out float4 oGlow : TEXCOORD0)
@@ -22,13 +24,17 @@ void main(
     float3 world = float3(dot(aRow0, local), dot(aRow1, local), dot(aRow2, local));
     oPosition = mul(uVp, float4(world, 1.0));
     float3 n = normalize(float3(dot(aRow0.xyz, aNormal), dot(aRow1.xyz, aNormal), dot(aRow2.xyz, aNormal)));
+    oMap = shadow_map(world, n, uFrame);
+    oHeight = world.y;
 #ifdef OPEN
     float sun = abs(dot(n, uFrame[0].xyz)) * 0.8 + 0.2;
 #else
     float sun = max(dot(n, uFrame[0].xyz), 0.0);
 #endif
     oLight = float4(hemi(n, uFrame) * aAo, sun);
-    oColor = float4(aColor.rgb * aTint.rgb * 2.0, haze_of(oPosition.w, uFrame));
-    float on = lerp(uFrame[1].w, 1.0, step(0.99, aColor.a));
+    // The tint is the instance's colour (its paint) over as much of the vertex as is paint: alpha 254 is all of it.
+    float paint = saturate(aColor.a * 1.004);
+    oColor = float4(aColor.rgb * lerp(float3(1.0, 1.0, 1.0), aTint.rgb * 2.0, paint), haze_of(oPosition.w, uFrame));
+    float on = lerp(uFrame[1].w, 1.0, step(0.998, aColor.a));
     oGlow = float4(aGlow.rgb * (aGlow.a * GLOW_RANGE * on), 0.0);
 }

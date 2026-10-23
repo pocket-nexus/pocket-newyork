@@ -17,6 +17,7 @@ mod interface;
 mod mat;
 mod near;
 mod paths;
+mod shadow;
 mod sky;
 
 use std::io::{Read, Write};
@@ -486,18 +487,28 @@ fn main() {
             let mut gpu = Gpu::new(live)?;
             let mut vram = Arena::new(Kind::Cdram, 4 * 1024 * 1024);
             let msaa = display_msaa;
-            let city = CityGpu::load(&mut p, &mut gpu, &mut vram, msaa, |line| shell.frame(Mode::Loading, line))?;
+            let heights: ny_pack::Heights = ny_pack::read(&p.read_range(ny_pack::HMAP, 0, 32)?, 0).ok_or("heights record")?;
+            let shadow_unit = 65535.0 * heights.unit;
+            let city = CityGpu::load(&mut p, &mut gpu, &mut vram, msaa, shadow_unit, |line| shell.frame(Mode::Loading, line))?;
             let sky = sky::Sky::new(&mut gpu, msaa)?;
             gpu.finish();
-            Ok((meta, presets, world, gpu, city, vram, sky))
+            shell.frame(Mode::Loading, "Casting the first shadows");
+            let start = &world.entities[1];
+            let sun = presets[0].sun_dir;
+            let shadows = shadow::Shadows::new(&mut vram, pack_path, heights, (p.range(ny_pack::HMAP)?.0 + 32) as u64, v3(sun[0], sun[1], sun[2]), v3(start.pos[0], start.pos[1], start.pos[2]))?;
+            Ok((meta, presets, world, gpu, city, vram, sky, shadows))
         })();
-        let (meta, presets, world, gpu, mut city, vram, sky) = match loaded {
+        let (meta, presets, world, gpu, mut city, vram, sky, mut shadows) = match loaded {
             Ok(x) => x,
             Err(e) => shell.fail(e),
         };
         let load_ms = t_load.elapsed().as_millis() as u64;
         let pack_id: Value = std::fs::read(paths::PACK_CARD_ID).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or(Value::Null);
 
+        // The models of the traffic's kinds (ny_sim::traffic::Kind's order) and of the player's vehicles (Mode's).
+        let kinds = ["taxi", "sedan", "suv", "nypd", "bus"].map(|n| city.model(n));
+        let player_models = [None, city.model("player-car"), city.model("player-cyclist"), city.model("player-helicopter")];
+        let mut placed: Vec<(usize, ny_pack::Instance)> = Vec::with_capacity(city::MODEL_INSTANCES);
         let mut game = Game::with_world(world);
         let mut session = Session::new();
         session.traffic = true;
@@ -596,7 +607,13 @@ fn main() {
             let aspect = 960.0 / 544.0;
             let vp = mat::mul(&mat::perspective(fov, aspect, 0.4, 30000.0), &mat::view(eye, look_dir));
             let preset = &presets[game.hour.index()];
-            let (frame, look, sky_f, night) = frame_light(preset);
+            let (mut frame, look, sky_f, night) = frame_light(preset);
+            let sun = preset.sun_dir;
+            shadows.update(v3(sun[0], sun[1], sun[2]), eye);
+            let map = shadows.mapping();
+            frame[13] = map[0];
+            frame[14] = map[1];
+            frame[15] = map[2];
             let sky_mvp = mat::mul(&mat::perspective(fov, aspect, 0.5, 4.0), &mat::view(V3::ZERO, look_dir));
 
             // -------------------------------------------------------------- the scene
@@ -612,7 +629,40 @@ fn main() {
             // The sky covers the whole frame: nothing is cleared.
             g::sceGxmSetViewport(ctx, 480.0, 480.0, 272.0, -272.0, 0.0, 1.0);
             sky.draw(ctx, &sky_mvp, &sky_f);
-            stats = city.draw(ctx, &vp, eye, &frame, &look, night, &set.show, frame_no);
+            stats = city.draw(ctx, &vp, eye, &frame, &look, night, shadows.texture(), &set.show, frame_no);
+            // What moves: the traffic, and the player's vehicle.
+            placed.clear();
+            if game.traffic_on {
+                for v in game.vehicles().iter().filter(|v| v.placed()) {
+                    let Some(m) = kinds[v.kind as usize] else { continue };
+                    // Paint is linear; the city is lit in the display's space.
+                    let tint = display(v.paint);
+                    placed.push((m, city::placed(v.x, 0.0, v.z, v.yaw, v.pitch, v.roll, tint)));
+                }
+            }
+            let pl = &game.players;
+            match game.mode {
+                ny_sim::Mode::Drive => {
+                    let c = &pl.car;
+                    if let Some(m) = player_models[1] {
+                        placed.push((m, city::placed(c.body.pos.x, c.body.pos.y + c.heave, c.body.pos.z, c.body.heading, c.pitch, c.roll, [1.0; 3])));
+                    }
+                }
+                ny_sim::Mode::Cycle => {
+                    let c = &pl.cyclist;
+                    if let Some(m) = player_models[2] {
+                        placed.push((m, city::placed(c.body.pos.x, c.body.pos.y, c.body.pos.z, c.body.heading, 0.0, c.lean, [1.0; 3])));
+                    }
+                }
+                ny_sim::Mode::Fly => {
+                    let h = &pl.heli;
+                    if let Some(m) = player_models[3] {
+                        placed.push((m, city::placed(h.body.pos.x, h.body.pos.y + h.bob, h.body.pos.z, h.body.heading, h.pitch, h.roll, [1.0; 3])));
+                    }
+                }
+                ny_sim::Mode::Walk => {}
+            }
+            stats.tris[2] += city.draw_models(ctx, &vp, &frame, &look, shadows.texture(), &mut placed);
             // vita2d draws (the interface, the menu) expect its own viewport and no depth.
             g::sceGxmSetViewport(ctx, 480.0, 480.0, 272.0, -272.0, 0.5, 0.5);
             gpu::state_overlay(ctx, false);
@@ -673,6 +723,7 @@ fn main() {
                     "game": {"player": r.mode.name(), "hour": game.hour.index(), "camera": game.camera, "mph": r.mph, "at": r.at, "label": game.label()},
                     "settings": {"near": set.show.reach.near, "mid": set.show.reach.mid, "detail": set.show.reach.detail, "profile": set.profile, "view": set.view.is_some()},
                     "programs": {"compiled": gpu.compiled, "cached": gpu.cached},
+                    "shadows": {"sweeps": shadows.sweeps, "sweepMs": shadows.sweep_ms()},
                     "msaa": samples,
                     "memory": {"geometry": city.geometry_bytes, "textures": city.texture_bytes, "vram": vram.reserved()},
                     "clockMhz": [scePowerGetArmClockFrequency(), scePowerGetGpuClockFrequency()],
