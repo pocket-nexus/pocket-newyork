@@ -11,11 +11,13 @@
 // Writes `models.json` and `models.bin` (arrays as scene.js writes them).
 
 import * as THREE from 'three/webgpu';
-import { float, floor, mod, uniform, vec4, vertexIndex } from 'three/tsl';
+import { float, floor, mod, positionWorld, uniform, vec4, vertexIndex } from 'three/tsl';
 import { Buffers } from './scene.js';
 import { log, put } from './util.js';
 
 const W = 1024;
+/** Metres a position is raised by on its way through a colour target, and lowered by after. */
+const LIFT = 100;
 
 const toSrgb = (x) => {
   x = Math.min(1, Math.max(0, x));
@@ -53,7 +55,8 @@ function parts(app) {
   return out;
 }
 
-/** Each vertex's value of `graph` (a colour node, or a plain colour) with `paint`. */
+/** Each vertex's value of `graph` (a colour node, or a plain colour) with `paint`; `which` 'position' reads where the
+ *  part's own position graph puts the vertex (a person posed by its rig), in the world. */
 async function evaluate(renderer, camera, part, which, paint) {
   const geo = new THREE.BufferGeometry();
   for (const [k, a] of Object.entries(part.geo.attributes)) if (!a.isInstancedBufferAttribute) geo.setAttribute(k, a);
@@ -67,7 +70,10 @@ async function evaluate(renderer, camera, part, which, paint) {
   const m = new THREE.MeshBasicNodeMaterial();
   m.fog = false;
   m.side = THREE.DoubleSide;
-  if (which === 'albedo') {
+  if (which === 'position') {
+    // (raised: what the material writes is clamped at zero)
+    m.colorNode = positionWorld.add(LIFT);
+  } else if (which === 'albedo') {
     if (orig.color) m.color.copy(orig.color);
     m.map = orig.map ?? null;
     m.vertexColors = !!orig.vertexColors;
@@ -80,6 +86,8 @@ async function evaluate(renderer, camera, part, which, paint) {
   const p = float(vertexIndex);
   m.vertexNode = vec4(mod(p, W).add(0.5).div(W).mul(2).sub(1), float(1).sub(floor(p.div(W)).add(0.5).div(W).mul(2)), 0, 1);
   const mesh = new THREE.Mesh(geo, m);
+  // (a person's mesh draws its people as instances; one is posed)
+  if (part.count) mesh.count = part.count;
   mesh.isPoints = true;
   mesh.frustumCulled = false;
   const scene = new THREE.Scene();
@@ -93,7 +101,90 @@ async function evaluate(renderer, camera, part, which, paint) {
   const px = await renderer.readRenderTargetPixelsAsync(target, 0, 0, W, Math.ceil(n / W));
   target.dispose();
   m.dispose();
+  if (which === 'position') for (let i = 0; i < px.length; i++) if (i % 4 < 3) px[i] -= LIFT;
   return px;
+}
+
+/**
+ * The people: the player on foot (the controllers' own PersonRig and PersonCrowd) walking and running on flat
+ * ground, caught at eight points of the gait cycle each, and standing; the cyclist's rider (riderRig.ride) at eight
+ * turns of the pedals. Each is its crowd mesh as its own position graph poses it, in the frame of the person (x
+ * across, z ahead) or of the bicycle.
+ */
+async function people(app, renderer, camera) {
+  const out = [];
+  const c = app.controllers;
+  const p = c.entities.person;
+  if (p?.rig && p?.crowd) {
+    const mesh = p.crowd.meshes[0];
+    const ground = (owner, x, z) => 0;
+    const pose = async (name) => {
+      p.crowd.begin();
+      p.crowd.add(p.rig, 0);
+      p.crowd.end();
+      const part = { model: name, geo: mesh.geometry, mat: mesh.material, count: 1 };
+      const pos = await evaluate(renderer, camera, part, 'position', 1);
+      // Into the person's frame: about its root, turned by its heading.
+      const n = mesh.geometry.attributes.position.count;
+      const local = new Float32Array(n * 3);
+      const yaw = p.rig.yaw, s = Math.sin(-yaw), co = Math.cos(-yaw);
+      for (let i = 0; i < n; i++) {
+        const x = pos[i * 4] - p.rig.x, y = pos[i * 4 + 1], z = pos[i * 4 + 2] - p.rig.z;
+        local[i * 3] = x * co + z * s;
+        local[i * 3 + 1] = y;
+        local[i * 3 + 2] = -x * s + z * co;
+      }
+      out.push({ model: name, geo: mesh.geometry, mat: mesh.material, count: 1, positions: local });
+    };
+    for (const [gait, speed] of [['walk', 1.6], ['run', 5.5]]) {
+      let x = 0, z = 0;
+      p.rig.reset(x, z, 0, ground, null);
+      const dt = 1 / 240;
+      // Into a steady gait, then the eight points of one cycle.
+      for (let k = 0; k < 240 * 4; k++) {
+        z += speed * dt;
+        p.rig.update(dt, x, z, 0, ground, null, 0);
+      }
+      for (let f = 0; f < 8; f++) {
+        const want = f / 8;
+        for (let k = 0; k < 2400; k++) {
+          const before = p.rig.phase;
+          z += speed * dt;
+          p.rig.update(dt, x, z, 0, ground, null, 0);
+          const d = (p.rig.phase - want + 1) % 1;
+          if (d < (p.rig.phase - before + 1) % 1) break;
+        }
+        await pose(`person-${gait}-${f}`);
+      }
+    }
+    {
+      let x = 0, z = 0;
+      p.rig.reset(x, z, 0, ground, null);
+      for (let k = 0; k < 480; k++) p.rig.update(1 / 240, x, z, 0, ground, null, 0);
+      await pose('person-stand');
+    }
+  }
+  const b = c.entities.cyclist;
+  const root = app.scene.getObjectByName('PlayerCyclist');
+  if (b?.riderRig && b?.riderCrowd && root) {
+    root.updateMatrixWorld(true);
+    const inv = root.matrixWorld.clone().invert();
+    const mesh = b.riderCrowd.meshes[0];
+    const v = new THREE.Vector3();
+    for (let f = 0; f < 8; f++) {
+      b.riderRig.ride(b.leanPivot, (f / 8) * Math.PI * 2, b.bikeFrame);
+      b.riderCrowd.begin();
+      b.riderCrowd.add(b.riderRig, 0);
+      b.riderCrowd.end();
+      const part = { model: `rider-${f}`, geo: mesh.geometry, mat: mesh.material, count: 1 };
+      const pos = await evaluate(renderer, camera, part, 'position', 1);
+      const n = mesh.geometry.attributes.position.count;
+      const local = new Float32Array(n * 3);
+      for (let i = 0; i < n; i++) v.set(pos[i * 4], pos[i * 4 + 1], pos[i * 4 + 2]).applyMatrix4(inv).toArray(local, i * 3);
+      out.push({ model: `rider-${f}`, geo: mesh.geometry, mat: mesh.material, count: 1, positions: local });
+    }
+  }
+  return out;
 }
 
 export async function exportModels(app) {
@@ -104,7 +195,7 @@ export async function exportModels(app) {
   camera.updateMatrixWorld();
   const buffers = new Buffers();
   const models = new Map();
-  for (const part of parts(app)) {
+  for (const part of [...parts(app), ...(await people(app, renderer, camera))]) {
     const g = part.geo;
     const n = g.attributes.position.count;
     lighting.applyPreset('midday', true);
@@ -115,8 +206,12 @@ export async function exportModels(app) {
     const pos = new Float32Array(n * 3);
     const nrm = new Float32Array(n * 3);
     const v = new THREE.Vector3();
-    const nm = new THREE.Matrix3().getNormalMatrix(part.m);
+    const nm = new THREE.Matrix3().getNormalMatrix(part.m ?? new THREE.Matrix4());
     for (let i = 0; i < n; i++) {
+      if (part.positions) {
+        pos.set(part.positions.subarray(i * 3, i * 3 + 3), i * 3);
+        continue;
+      }
       v.fromBufferAttribute(g.attributes.position, i).applyMatrix4(part.m).toArray(pos, i * 3);
       if (g.attributes.normal) v.fromBufferAttribute(g.attributes.normal, i).applyMatrix3(nm).normalize().toArray(nrm, i * 3);
     }
@@ -148,7 +243,9 @@ export async function exportModels(app) {
       glow: buffers.add(emit),
       index: buffers.add(index),
       unlit: part.mat.type === 'MeshBasicNodeMaterial',
-      double: part.mat.side === THREE.DoubleSide
+      double: part.mat.side === THREE.DoubleSide,
+      // A posed person's normals are the compiler's to work out from where its vertices are.
+      posed: !!part.positions
     });
     models.set(part.model, list);
   }

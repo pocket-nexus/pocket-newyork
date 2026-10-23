@@ -18,6 +18,8 @@ struct Part {
     index: Array,
     unlit: bool,
     double: bool,
+    #[serde(default)]
+    posed: bool,
 }
 
 #[derive(Deserialize)]
@@ -45,7 +47,21 @@ pub fn shapes(ir: &Path, bins: &mut Bins) -> Result<Parts, String> {
     for m in &models.models {
         let mut parts = Vec::new();
         for p in &m.parts {
-            let (pos, nrm, col, glow) = (f32s(&p.position), f32s(&p.normal), u8s(&p.color), u8s(&p.glow));
+            let (pos, mut nrm, col, glow) = (f32s(&p.position), f32s(&p.normal), u8s(&p.color), u8s(&p.glow));
+            let idx = u32s(&p.index);
+            // A posed person's normals: its faces' normals, summed at each vertex.
+            if p.posed {
+                nrm = vec![0.0; p.verts * 3];
+                for f in idx.chunks(3) {
+                    let v = |k: usize| [pos[f[k] as usize * 3], pos[f[k] as usize * 3 + 1], pos[f[k] as usize * 3 + 2]];
+                    let n = geom::cross(geom::sub(v(1), v(0)), geom::sub(v(2), v(0)));
+                    for &i in f {
+                        for k in 0..3 {
+                            nrm[i as usize * 3 + k] += n[k];
+                        }
+                    }
+                }
+            }
             let verts: Vec<Vx> = (0..p.verts)
                 .map(|i| {
                     let n = geom::normalize([nrm[i * 3], nrm[i * 3 + 1], nrm[i * 3 + 2]]);
@@ -64,7 +80,6 @@ pub fn shapes(ir: &Path, bins: &mut Bins) -> Result<Parts, String> {
                     Vx { p: [pos[i * 3], pos[i * 3 + 1], pos[i * 3 + 2]], n: n.map(geom::snorm8), ao: 255, a, b, uv: [0.0; 2] }
                 })
                 .collect();
-            let idx = u32s(&p.index);
             parts.push((bins.shape(&verts, &idx), p.double));
         }
         out.push((m.name.clone(), parts));

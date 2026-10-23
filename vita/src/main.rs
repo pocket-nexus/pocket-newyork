@@ -526,6 +526,12 @@ fn main() {
         // The models of the traffic's kinds (ny_sim::traffic::Kind's order) and of the player's vehicles (Mode's).
         let kinds = ["taxi", "sedan", "suv", "nypd", "bus"].map(|n| city.model(n));
         let player_models = [None, city.model("player-car"), city.model("player-cyclist"), city.model("player-helicopter")];
+        // The people, posed by the export at eight points of their cycles.
+        let walk: Vec<Option<usize>> = (0..8).map(|k| city.model(&format!("person-walk-{k}"))).collect();
+        let run: Vec<Option<usize>> = (0..8).map(|k| city.model(&format!("person-run-{k}"))).collect();
+        let stand = city.model("person-stand");
+        let rider: Vec<Option<usize>> = (0..8).map(|k| city.model(&format!("rider-{k}"))).collect();
+        let mut gait = 0.0f32;
         let mut placed: Vec<(usize, ny_pack::Instance)> = Vec::with_capacity(city::MODEL_INSTANCES);
         let mut game = Game::with_world(world);
         let mut session = Session::new();
@@ -674,8 +680,13 @@ fn main() {
                 }
                 ny_sim::Mode::Cycle => {
                     let c = &pl.cyclist;
+                    let at = city::placed(c.body.pos.x, c.body.pos.y, c.body.pos.z, c.body.heading, 0.0, c.lean, [1.0; 3]);
                     if let Some(m) = player_models[2] {
-                        placed.push((m, city::placed(c.body.pos.x, c.body.pos.y, c.body.pos.z, c.body.heading, 0.0, c.lean, [1.0; 3])));
+                        placed.push((m, at));
+                    }
+                    let k = ((c.pedal_phase / core::f32::consts::TAU).rem_euclid(1.0) * 8.0) as usize % 8;
+                    if let Some(m) = rider[k] {
+                        placed.push((m, at));
                     }
                 }
                 ny_sim::Mode::Fly => {
@@ -684,7 +695,19 @@ fn main() {
                         placed.push((m, city::placed(h.body.pos.x, h.body.pos.y + h.bob, h.body.pos.z, h.body.heading, h.pitch, h.roll, [1.0; 3])));
                     }
                 }
-                ny_sim::Mode::Walk => {}
+                ny_sim::Mode::Walk => {
+                    // The gait cycle as the reference's rig keeps it: walking, its cadence grows with speed
+                    // (speed^0.43 / 1.22 cycles a second); running, one and a half cycles a second.
+                    let p = &pl.person;
+                    let speed = p.body.speed.abs();
+                    let running = speed > 3.0;
+                    gait = (gait + if running { 1.5 } else { libm::powf(speed.max(0.01), 0.43) / 1.22 } * dt).rem_euclid(1.0);
+                    let k = (gait * 8.0) as usize % 8;
+                    let m = if speed < 0.3 { stand } else if running { run[k] } else { walk[k] };
+                    if let Some(m) = m {
+                        placed.push((m, city::placed(p.body.pos.x, p.body.pos.y, p.body.pos.z, p.body.heading, 0.0, 0.0, [1.0; 3])));
+                    }
+                }
             }
             stats.tris[2] += city.draw_models(ctx, &vp, &frame, &look, shadows.texture(), &mut placed);
             // vita2d draws (the interface, the menu) expect its own viewport and no depth.
