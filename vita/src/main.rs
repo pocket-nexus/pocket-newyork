@@ -854,10 +854,10 @@ fn main() {
             }
             smooth(&mut cpu_part[1], ts);
             // What is bright in the frame on display glows over this one, as the reference's bloom does for the hour:
-            // its strength, and its threshold where the display shows it (a little under: the chain sees the display's
-            // compressed highlights).
-            let glow_gain = preset.bloom[0] * 3.0;
-            let glow_threshold = (preset.bloom[1] - 0.12).clamp(0.55, 0.9);
+            // its strength, and its threshold where the display shows it (under it, the hazy sky by the horizon would
+            // bloom and wash the frame out).
+            let glow_gain = preset.bloom[0] * 1.5;
+            let glow_threshold = preset.bloom[1].clamp(0.6, 0.95);
             if let Err(e) = if set.post { glow.run(ctx, glow_gain, glow_threshold, g::vita2d_get_current_fb(), 960) } else { Ok(()) } {
                 pocketjs_vita::vita_log(format_args!("newyork: {e}"));
             }

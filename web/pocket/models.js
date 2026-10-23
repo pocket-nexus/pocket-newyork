@@ -54,6 +54,7 @@ function parts(app) {
     const geo = NYC.buildBusWheelGeo(side);
     for (const wz of [B.wheelZ, -B.wheelZ]) out.push({ model: 'bus', geo, mat: wheelMat, m: new THREE.Matrix4().makeTranslation(side * B.wheelX, B.wheelRadius, wz) });
   }
+  const heliBody = NYC.buildHelicopterBodyGeometry().attributes.position.count;
   // The player's vehicles, in the frame of their group.
   for (const [model, name] of [['player-car', 'PlayerTaxiCar'], ['player-cyclist', 'PlayerCyclist'], ['player-helicopter', 'PlayerHelicopter']]) {
     const root = app.scene.getObjectByName(name);
@@ -63,7 +64,14 @@ function parts(app) {
     root.traverse((o) => {
       if (!o.isMesh || o.material?.userData?.pocket?.factory === 'createContactShadowMaterial') return;
       const mat = Array.isArray(o.material) ? o.material[0] : o.material;
-      const boxed = model === 'player-car' && mat.userData?.pocket?.factory === 'createLoftedCarMaterial' ? 'player-car' : undefined;
+      // (the helicopter's body alone: its rotors' blades would lie over the body's view from above)
+      const factory = mat.userData?.pocket?.factory;
+      const boxed =
+        model === 'player-car' && factory === 'createLoftedCarMaterial'
+          ? 'player-car'
+          : model === 'player-helicopter' && factory === 'createLoftedHelicopterMaterial' && o.geometry.attributes.position.count === heliBody
+            ? 'player-helicopter'
+            : undefined;
       out.push({ model, geo: o.geometry, mat, m: inv.clone().multiply(o.matrixWorld), name: o.name, boxed });
     });
   }
@@ -434,6 +442,7 @@ export async function exportModels(app) {
       index: buffers.add(index),
       unlit: part.mat.type === 'MeshBasicNodeMaterial',
       double: part.mat.side === THREE.DoubleSide,
+      opacity: part.mat.transparent ? part.mat.opacity ?? 1 : 1,
       roughness: part.mat.roughness ?? 0.8,
       metalness: part.mat.metalness ?? 0,
       // A posed person's normals are the compiler's to work out from where its vertices are.

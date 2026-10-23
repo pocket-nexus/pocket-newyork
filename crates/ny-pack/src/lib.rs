@@ -232,7 +232,8 @@ pub struct Batch {
     pub inst_first: u32,
     pub inst_count: u32,
     pub spans: u32,
-    pub pad: u32,
+    /// How opaque a model's part is drawn, 1..255 for a part seen through (0: opaque).
+    pub veil: u32,
 }
 
 pub const NO_SPANS: u32 = u32::MAX;

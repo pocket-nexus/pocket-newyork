@@ -160,6 +160,7 @@ struct Pass {
     look: Param,
     gloss: Param,
     bake: Param,
+    veil: Param,
     units: [u32; 2],
     shadow: Option<u32>,
 }
@@ -167,7 +168,7 @@ struct Pass {
 impl Pass {
     unsafe fn new(prog: Program, pictures: [&str; 2]) -> Pass {
         let units = pictures.map(|name| if name.is_empty() { 0 } else { prog.fs.sampler_index(name).unwrap_or(0) });
-        Pass { mvp: prog.vs.param("uMvp"), tile: prog.vs.param("uTile"), lamp_map: prog.vs.param("uLampMap"), lamp: prog.fs.sampler_index("uLamp"), around: prog.fs.sampler_index("uAround"), sun_vp: prog.vs.param("uSunVp"), sun: prog.fs.sampler_index("uSun"), vp: prog.vs.param("uVp"), bx: prog.vs.param("uBox"), frame: prog.vs.param("uFrame"), look: prog.fs.param("uLook"), gloss: prog.vs.param("uGloss"), bake: prog.vs.param("uBake"), units, shadow: prog.fs.sampler_index("uShadow"), prog }
+        Pass { mvp: prog.vs.param("uMvp"), tile: prog.vs.param("uTile"), lamp_map: prog.vs.param("uLampMap"), lamp: prog.fs.sampler_index("uLamp"), around: prog.fs.sampler_index("uAround"), sun_vp: prog.vs.param("uSunVp"), sun: prog.fs.sampler_index("uSun"), vp: prog.vs.param("uVp"), bx: prog.vs.param("uBox"), frame: prog.vs.param("uFrame"), look: prog.fs.param("uLook"), gloss: prog.vs.param("uGloss"), bake: prog.vs.param("uBake"), veil: prog.fs.param("uVeil"), units, shadow: prog.fs.sampler_index("uShadow"), prog }
     }
 
     /// Binds the program, the shadow window and the lamps' light (under them, and around).
@@ -252,6 +253,9 @@ pub struct CityGpu {
     sun_solid: Pass,
     sun_inst: Pass,
     sun_leaf: Pass,
+    /// A model's part seen through (`Batch::veil`), blended over what is behind it.
+    veil: Pass,
+    veil_night: Pass,
     picture: Pass,
     picture_inst: Pass,
     /// The lamps' light on the ground by night, and from world x and z to its texture coordinates; and that light
@@ -335,6 +339,9 @@ impl CityGpu {
         let sun_one = [Stream { stride: 20, instanced: false, attrs: &SUN_ATTRS }];
         let sun_many = [Stream { stride: 20, instanced: false, attrs: &SUN_ATTRS }, Stream { stride: 52, instanced: true, attrs: &INST_ATTRS[..3] }];
         let sun_cards = [Stream { stride: 20, instanced: false, attrs: &SUN_LEAF_ATTRS }, Stream { stride: 52, instanced: true, attrs: &INST_ATTRS[..3] }];
+        let blended = [Blend::Alpha, Blend::Alpha];
+        let veil = Pass::new(gpu.program("veil", &format!("{defines}#define VEIL\n"), INST_V, SOLID_F, &inst_streams, msaa, blended)?, ["", ""]);
+        let veil_night = Pass::new(gpu.program("veil_night", &format!("{defines}#define VEIL\n#define NIGHT\n"), INST_V, SOLID_F, &inst_streams, msaa, blended)?, ["", ""]);
         let sun_solid = Pass::new(gpu.program("sun", &defines, SUN_V, SUN_F, &sun_one, 0, opaque)?, ["", ""]);
         let sun_inst = Pass::new(gpu.program("sun_inst", &format!("{defines}#define INSTANCED\n"), SUN_V, SUN_F, &sun_many, 0, opaque)?, ["", ""]);
         let sun_leaf = Pass::new(gpu.program("sun_leaf", &format!("{defines}#define INSTANCED\n#define LEAF\n"), SUN_V, SUN_F, &sun_cards, 0, opaque)?, ["uLeaves", ""]);
@@ -497,6 +504,8 @@ impl CityGpu {
             sun_solid,
             sun_inst,
             sun_leaf,
+            veil,
+            veil_night,
             picture,
             picture_inst,
             lamp,
@@ -720,54 +729,68 @@ impl CityGpu {
     /// Inside a scene on `ctx`, after `draw` this frame.
     pub unsafe fn draw_models(&mut self, ctx: *mut g::SceGxmContext, vp: &Mat4, frame: &Frame, look: &[f32; 12], haze: &Haze, night: bool, shadow: &g::SceGxmTexture, sun: &SunMap, groups: &[ModelGroup]) -> u32 {
         let mut tris = 0;
-        for group in groups {
-            let n = group.count;
-            let model = self.models[group.model];
-            for bi in model.first..model.first + model.count {
-                let b = self.batches[bi as usize];
-                let boxed = b.kind == kind::BOXED_INST;
-                let pass = match (b.kind == kind::OPEN_INST, boxed, night) {
-                    (_, true, true) => &self.boxed_night,
-                    (_, true, false) => &self.boxed,
-                    (true, _, true) => &self.inst_open_night,
-                    (true, _, false) => &self.inst_open,
-                    (false, _, true) => &self.inst_night,
-                    (false, _, false) => &self.inst,
-                };
-                pass.bind(ctx, shadow, &self.lamp, &self.around, sun.texture());
-                // A car's pictures, and what it emits by night over its glow picture's scale.
-                let mut glow = 0.0;
-                if boxed {
-                    if let Some(Some(t)) = self.textures.get(b.tex as usize) {
-                        g::sceGxmSetFragmentTexture(ctx, pass.units[0], &t.gxm);
+        // The opaque parts, then what is seen through (blended over them, not hiding what is behind).
+        for seen_through in [false, true] {
+            for group in groups {
+                let n = group.count;
+                let model = self.models[group.model];
+                for bi in model.first..model.first + model.count {
+                    let b = self.batches[bi as usize];
+                    if (b.veil != 0) != seen_through {
+                        continue;
                     }
-                    let night_tex = self.texs.get(b.tex as usize).map(|e| e.night).unwrap_or(NO_TEX);
-                    if let Some(Some(t)) = self.textures.get(night_tex as usize) {
-                        g::sceGxmSetFragmentTexture(ctx, pass.units[1], &t.gxm);
+                    let boxed = b.kind == kind::BOXED_INST;
+                    let pass = match (b.kind == kind::OPEN_INST, boxed, night) {
+                        _ if seen_through => if night { &self.veil_night } else { &self.veil },
+                        (_, true, true) => &self.boxed_night,
+                        (_, true, false) => &self.boxed,
+                        (true, _, true) => &self.inst_open_night,
+                        (true, _, false) => &self.inst_open,
+                        (false, _, true) => &self.inst_night,
+                        (false, _, false) => &self.inst,
+                    };
+                    pass.bind(ctx, shadow, &self.lamp, &self.around, sun.texture());
+                    // A car's pictures, and what it emits by night over its glow picture's scale.
+                    let mut glow = 0.0;
+                    if boxed {
+                        if let Some(Some(t)) = self.textures.get(b.tex as usize) {
+                            g::sceGxmSetFragmentTexture(ctx, pass.units[0], &t.gxm);
+                        }
+                        let night_tex = self.texs.get(b.tex as usize).map(|e| e.night).unwrap_or(NO_TEX);
+                        if let Some(Some(t)) = self.textures.get(night_tex as usize) {
+                            g::sceGxmSetFragmentTexture(ctx, pass.units[1], &t.gxm);
+                        }
+                        glow = self.texs.get(night_tex as usize).map(|e| e.metres).unwrap_or(0.0) * frame[7];
                     }
-                    glow = self.texs.get(night_tex as usize).map(|e| e.metres).unwrap_or(0.0) * frame[7];
+                    if seen_through {
+                        gpu::state_overlay(ctx, true);
+                        g::sceGxmSetCullMode(ctx, g::SceGxmCullMode_SCE_GXM_CULL_NONE);
+                    } else {
+                        gpu::state_opaque(ctx, if b.kind == kind::OPEN_INST { Cull::None } else { Cull::Cw });
+                    }
+                    let v = Uniforms::vertex(ctx);
+                    v.set(pass.vp, vp);
+                    v.set(pass.lamp_map, &self.lamp_map);
+                    v.set(pass.sun_vp, &sun.read);
+                    v.set(pass.bx, &[b.origin[0], b.origin[1], b.origin[2], 0.0, b.span[0], b.span[1], b.span[2], 0.0]);
+                    if boxed {
+                        let (lo, size) = (model.box_min, model.box_size);
+                        v.set(pass.bake, &[lo[0], lo[1], lo[2], 0.0, 1.0 / size[0].max(1e-3), 1.0 / size[1].max(1e-3), 1.0 / size[2].max(1e-3), 0.0]);
+                    }
+                    let mut l = *look;
+                    l[7] = glow;
+                    l[9..12].copy_from_slice(&haze.towards(group.at));
+                    let f = Uniforms::fragment(ctx);
+                    f.set(pass.look, &l);
+                    f.set(pass.veil, &[b.veil as f32 / 255.0, 0.0, 0.0, 0.0]);
+                    let mut fr = *frame;
+                    fr[3] = haze.density_to(group.at.y);
+                    v.set(pass.frame, &fr);
+                    g::sceGxmSetVertexStream(ctx, 0, self.own.solids.add(b.vtx_first as usize * 20).cast());
+                    g::sceGxmSetVertexStream(ctx, 1, group.buf.cast());
+                    g::sceGxmDrawInstanced(ctx, g::SceGxmPrimitiveType_SCE_GXM_PRIMITIVE_TRIANGLES, g::SceGxmIndexFormat_SCE_GXM_INDEX_FORMAT_U16, self.own.indices.add(b.idx_first as usize).cast(), b.idx_count * n, b.idx_count);
+                    tris += b.idx_count / 3 * n;
                 }
-                gpu::state_opaque(ctx, if b.kind == kind::OPEN_INST { Cull::None } else { Cull::Cw });
-                let v = Uniforms::vertex(ctx);
-                v.set(pass.vp, vp);
-                v.set(pass.lamp_map, &self.lamp_map);
-                v.set(pass.sun_vp, &sun.read);
-                v.set(pass.bx, &[b.origin[0], b.origin[1], b.origin[2], 0.0, b.span[0], b.span[1], b.span[2], 0.0]);
-                if boxed {
-                    let (lo, size) = (model.box_min, model.box_size);
-                    v.set(pass.bake, &[lo[0], lo[1], lo[2], 0.0, 1.0 / size[0].max(1e-3), 1.0 / size[1].max(1e-3), 1.0 / size[2].max(1e-3), 0.0]);
-                }
-                let mut l = *look;
-                l[7] = glow;
-                l[9..12].copy_from_slice(&haze.towards(group.at));
-                Uniforms::fragment(ctx).set(pass.look, &l);
-                let mut fr = *frame;
-                fr[3] = haze.density_to(group.at.y);
-                v.set(pass.frame, &fr);
-                g::sceGxmSetVertexStream(ctx, 0, self.own.solids.add(b.vtx_first as usize * 20).cast());
-                g::sceGxmSetVertexStream(ctx, 1, group.buf.cast());
-                g::sceGxmDrawInstanced(ctx, g::SceGxmPrimitiveType_SCE_GXM_PRIMITIVE_TRIANGLES, g::SceGxmIndexFormat_SCE_GXM_INDEX_FORMAT_U16, self.own.indices.add(b.idx_first as usize).cast(), b.idx_count * n, b.idx_count);
-                tris += b.idx_count / 3 * n;
             }
         }
         tris
@@ -842,6 +865,9 @@ impl CityGpu {
             let model = self.models[group.model];
             for bi in model.first..model.first + model.count {
                 let b = self.batches[bi as usize];
+                if b.veil != 0 {
+                    continue;
+                }
                 let v = Uniforms::vertex(ctx);
                 v.set(self.sun_inst.sun_vp, &sun.draw);
                 v.set(self.sun_inst.bx, &[b.origin[0], b.origin[1], b.origin[2], 0.0, b.span[0], b.span[1], b.span[2], 0.0]);

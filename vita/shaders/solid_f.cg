@@ -6,6 +6,10 @@ uniform sampler2D uAround;
 #endif
 // See frame.cg
 uniform float4 uLook[3];
+#ifdef VEIL
+// x: how opaque the part is
+uniform float4 uVeil;
+#endif
 
 half4 main(float4 vSun : TEXCOORD6, float2 vMap : TEXCOORD1, float vHeight : TEXCOORD2, half4 vSpec : TEXCOORD4,
 #ifdef NIGHT
@@ -19,5 +23,9 @@ half4 main(float4 vSun : TEXCOORD6, float2 vMap : TEXCOORD1, float vHeight : TEX
     light += lamps((half3)tex2D(uLamp, vLamp.xy).rgb, (half3)tex2D(uAround, vLamp.xy).rgb, vLamp.z, uLook);
 #endif
     half3 c = vColor.rgb * vColor.rgb * light * ((half)LIGHT_SCALE * vSpec.a) + vSpec.rgb + vGlow.rgb;
+#ifdef VEIL
+    return half4(shown(c, vColor.a, uLook), (half)uVeil.x);
+#else
     return half4(shown(c, vColor.a, uLook), 1.0);
+#endif
 }

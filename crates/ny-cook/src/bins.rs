@@ -266,7 +266,7 @@ impl Written {
             } else {
                 NO_SPANS
             };
-            self.batches.push(Batch { kind, tex, vtx_first, vtx_count: order.len() as u32, idx_first, idx_count: local.len() as u32, origin, span, inst_first: 0, inst_count: 0, spans, pad: 0 });
+            self.batches.push(Batch { kind, tex, vtx_first, vtx_count: order.len() as u32, idx_first, idx_count: local.len() as u32, origin, span, inst_first: 0, inst_count: 0, spans, veil: 0 });
             at = end;
         }
     }

@@ -29,6 +29,13 @@ struct Part {
     /// The pictures it is drawn under (a key of `boxes`).
     #[serde(default)]
     boxed: Option<String>,
+    /// How opaque it is drawn (a rotor's blur, 0.13).
+    #[serde(default = "opaque")]
+    opacity: f32,
+}
+
+fn opaque() -> f32 {
+    1.0
 }
 
 fn matte() -> f32 {
@@ -65,6 +72,7 @@ pub struct Shaped {
     pub shape: u32,
     pub double: bool,
     pub boxed: Option<u32>,
+    pub opacity: f32,
 }
 
 /// The models: name, parts, and the box their pictures were drawn over.
@@ -167,7 +175,7 @@ pub fn shapes(ir: &Path, bins: &mut Bins, textures: &mut crate::tex::Textures) -
             if let Some(b) = p.boxed.as_ref().and_then(|b| models.boxes.get(b)) {
                 boxed = Some((b.min, b.size));
             }
-            parts.push(Shaped { shape: bins.shape(&verts, &idx), double: p.double, boxed: tex });
+            parts.push(Shaped { shape: bins.shape(&verts, &idx), double: p.double, boxed: tex, opacity: p.opacity });
         }
         out.push((m.name.clone(), parts, boxed));
     }
@@ -183,6 +191,7 @@ pub fn table(parts: &Parts, w: &mut Written) -> Vec<Model> {
             let mut b = w.shape_batches[p.shape as usize];
             b.kind = if p.boxed.is_some() { pack::kind::BOXED_INST } else if p.double { pack::kind::OPEN_INST } else { pack::kind::SOLID_INST };
             b.tex = p.boxed.unwrap_or(pack::NO_TEX);
+            b.veil = if p.opacity < 0.99 { (p.opacity * 255.0).round().clamp(1.0, 254.0) as u32 } else { 0 };
             w.batches.push(b);
         }
         let mut n = [0u8; 24];
