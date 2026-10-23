@@ -515,7 +515,7 @@ impl CityGpu {
     ///
     /// # Safety
     /// Inside a scene on `ctx`.
-    pub unsafe fn draw(&mut self, ctx: *mut g::SceGxmContext, vp: &Mat4, eye: V3, frame: &Frame, look: &[f32; 12], haze: &Haze, night: bool, shadow: &g::SceGxmTexture, sun: &SunMap, show: &Show, frame_no: u32) -> Stats {
+    pub unsafe fn draw(&mut self, ctx: *mut g::SceGxmContext, vp: &Mat4, eye: V3, frame: &Frame, look: &[f32; 12], haze: &Haze, night: bool, shadow: &g::SceGxmTexture, sun: &SunMap, horizon: &crate::horizon::Horizon, show: &Show, frame_no: u32) -> Stats {
         let planes = mat::planes(vp);
         let mut stats = Stats::default();
         let mut items = core::mem::take(&mut self.items);
@@ -525,7 +525,7 @@ impl CityGpu {
         self.near.receive();
         let tables = Tables { city: &self.city, cells: &self.cells, blocks: &self.blocks, regions: &self.regions, batches: &self.batches, spans: &self.spans };
         let near = &self.near;
-        let counts = ny_view::select(&tables, &planes, [eye.x, eye.y, eye.z], &show.reach, &|c| near.ready(c).is_some(), &mut |c, d| wanted.push((c, d)), &mut items);
+        let counts = ny_view::select(&tables, &planes, [eye.x, eye.y, eye.z], &show.reach, &|c| near.ready(c).is_some(), &mut |c, d| wanted.push((c, d)), &|lo, hi| horizon.sees(lo, hi), &mut items);
         stats.places = counts.places;
         self.near.request(&mut wanted, &self.near_cells, frame_no);
         for it in &items {

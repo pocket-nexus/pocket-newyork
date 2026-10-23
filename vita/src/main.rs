@@ -21,6 +21,7 @@ mod near;
 mod paths;
 mod shadow;
 mod sunmap;
+mod horizon;
 mod sky;
 
 use std::io::{Read, Write};
@@ -113,8 +114,47 @@ pub unsafe extern "C" fn __wrap_sceGxmCreateContext(params: *const g::SceGxmCont
     __real_sceGxmCreateContext(&p, context)
 }
 
-/// Samples per pixel of the display surface the scene is drawn into.
-const DEFAULT_MSAA: u64 = 4;
+/// The world's step (the traffic, the people, the highway) on a thread of its own, alongside a frame's drawing: the
+/// frame hands it the game after placing what moves and takes it back before it reads the game again.
+struct WorldThread {
+    kick: mpsc::Sender<(usize, ny_sim::game::WorldStep)>,
+    done: mpsc::Receiver<()>,
+    out: Option<ny_sim::game::WorldStep>,
+}
+
+impl WorldThread {
+    fn new() -> WorldThread {
+        let (kick, jobs) = mpsc::channel::<(usize, ny_sim::game::WorldStep)>();
+        let (finished, done) = mpsc::channel();
+        let _ = std::thread::Builder::new().name("newyork-world".into()).stack_size(256 * 1024).spawn(move || {
+            while let Ok((game, w)) = jobs.recv() {
+                // Safety: the frame does not touch the game between `kick` and `join`.
+                unsafe { (*(game as *mut Game)).step_world(&w) };
+                if finished.send(()).is_err() {
+                    break;
+                }
+            }
+        });
+        WorldThread { kick, done, out: None }
+    }
+
+    /// Hands `game` to the thread for `w`. Nothing else may touch it until `join`.
+    fn kick(&mut self, game: &mut Game, w: ny_sim::game::WorldStep) {
+        if self.kick.send((game as *mut Game as usize, w)).is_ok() {
+            self.out = Some(w);
+        }
+    }
+
+    /// Waits for the step handed over, if any, and gives back what it was for.
+    fn join(&mut self) -> Option<ny_sim::game::WorldStep> {
+        let w = self.out.take()?;
+        let _ = self.done.recv();
+        Some(w)
+    }
+}
+
+/// Samples per pixel of the display surface the scene is drawn into (4 costs the street's frame some 2.5 ms more).
+const DEFAULT_MSAA: u64 = 2;
 
 /// vita2d's pool of temporary vertices, which the interface and the Devkit menu draw from. A frame takes half of it,
 /// in turn (see the display scene).
@@ -293,8 +333,9 @@ struct Settings {
     /// Draw what moves, and the glow over the frame (off for measurements).
     models: bool,
     post: bool,
-    /// Draw the sun's depth map (off for a measurement of what it costs).
+    /// Draw the sun's depth map (off for a measurement of what it costs); leave out what the street hides.
     sun: bool,
+    occlude: bool,
     /// A fixed eye (position, target, fov), for captures and measurements; `None` follows the game.
     view: Option<(V3, V3, f32)>,
     /// Triangles a frame may draw: the reaches of the levels of detail follow it (and the GPU).
@@ -348,6 +389,7 @@ fn apply_control(v: &Value, s: &mut Settings, game: &mut Game, session: &mut Ses
     s.models = flag("models", s.models);
     s.post = flag("post", s.post);
     s.sun = flag("sun", s.sun);
+    s.occlude = flag("occlude", s.occlude);
     s.show.walls = flag("walls", s.show.walls);
     s.show.solids = flag("solids", s.show.solids);
     s.show.instances = flag("instances", s.show.instances);
@@ -588,9 +630,14 @@ fn main() {
         let mut placed: Vec<(usize, ny_pack::Instance)> = Vec::with_capacity(city::MODEL_INSTANCES);
         let mut sun_tris = 0u32;
         let mut shown_late = false;
+        // Milliseconds (smoothed) the frame waited for the world's thread.
+        let mut joined_ms = 0.0f32;
         // Milliseconds (smoothed) of the frame's CPU parts: placing what moves, the sun's pass, the city's, the models'.
         let mut cpu_part = [0.0f32; 4];
         let mut game = Game::with_world(world);
+        let mut world_thread = WorldThread::new();
+        let mut horizon = horizon::Horizon::new();
+        let mut horizon_ms = 0.0f32;
         // The highway's 2 642 cars cost this CPU some 12 ms a frame stepped together: a lane at a time, every eighth frame
         // each.
         game.highway.every = 8;
@@ -616,6 +663,7 @@ fn main() {
             models: true,
             post: true,
             sun: true,
+            occlude: true,
             view: None,
             budget: 300_000,
             govern: true,
@@ -668,7 +716,7 @@ fn main() {
             last_vcount = vcount;
             let dt = vblanks as f32 / 60.0;
             let ts = Instant::now();
-            session.run(&mut game, &session_pad(&pad), dt);
+            let world_step = session.run_now(&mut game, &session_pad(&pad), dt);
             sim_ms = sim_ms * 0.9 + ts.elapsed().as_secs_f32() * 100.0;
 
             // -------------------------------------------------------------- the interface
@@ -775,6 +823,12 @@ fn main() {
                     }
                 }
             }
+            let hour_shown = game.hour.index();
+            // The world's step for this frame on its own thread while the frame draws; the game is the thread's until
+            // the join below (what moves is drawn as it stood after the frame before's step).
+            if let Some(w) = world_step {
+                world_thread.kick(&mut game, w);
+            }
             let groups = city.prepare_models(&mut placed);
             let smooth = |a: &mut f32, t: Instant| *a = *a * 0.9 + t.elapsed().as_secs_f32() * 100.0;
             smooth(&mut cpu_part[0], tp);
@@ -806,9 +860,13 @@ fn main() {
             g::vita2d_start_drawing_advanced(core::ptr::null_mut(), 0);
             // The sky covers the whole frame: nothing is cleared.
             g::sceGxmSetViewport(ctx, 480.0, 480.0, 272.0, -272.0, 0.0, 1.0);
-            sky.draw(ctx, &sky_mvp, game.hour.index());
+            sky.draw(ctx, &sky_mvp, hour_shown);
+            let th = Instant::now();
+            // What the street hides (from above the city, nothing).
+            horizon.build(eye, if set.occlude { shadows.coarse() } else { None }.as_deref());
+            horizon_ms = horizon_ms * 0.9 + th.elapsed().as_secs_f32() * 100.0;
             let tc = Instant::now();
-            stats = city.draw(ctx, &vp, eye, &frame, &look, &haze, night, shadows.texture(), &sunmap, &set.show, frame_no);
+            stats = city.draw(ctx, &vp, eye, &frame, &look, &haze, night, shadows.texture(), &sunmap, &horizon, &set.show, frame_no);
             smooth(&mut cpu_part[2], tc);
             if set.models {
                 let tm = Instant::now();
@@ -851,7 +909,8 @@ fn main() {
                     scale *= 1.008;
                 }
                 hold = hold.saturating_sub(1);
-                scale = scale.clamp(0.3, 1.0);
+                // (not below 0.45: what the street costs most, its trees and what moves, does not come in with the reaches)
+                scale = scale.clamp(0.45, 1.0);
                 set.show.reach = Reach { detail: set.full.detail * scale.max(0.6), near: set.full.near * scale, mid: set.full.mid * scale, far: set.full.far * (0.5 + 0.5 * scale) };
             }
             let worked = t_frame.elapsed().saturating_sub(waited);
@@ -881,6 +940,11 @@ fn main() {
             if clock_tick % 60 == 0 && scePowerGetArmClockFrequency() < CLOCKS[0] - 20 {
                 set_clocks();
             }
+            let tj = Instant::now();
+            if let Some(w) = world_thread.join() {
+                game.push_player(&w);
+            }
+            joined_ms = joined_ms * 0.9 + tj.elapsed().as_secs_f32() * 100.0;
             if frame_no % 10 == 0 {
                 let r = game.readout();
                 let (filled, slots) = city.near.filled();
@@ -891,7 +955,7 @@ fn main() {
                     "pack": {"path": pack_path, "sha256": pack_id["sha256"], "bytes": pack_id["bytes"], "profile": meta["profile"]},
                     "loadMs": load_ms, "copyMs": copy_ms,
                     "frameMs": timing.avg(), "worstMs": timing.worst(), "late": timing.late, "lateBy": {"cpu": late_cpu, "gpu": late_gpu}, "frames": timing.frames, "pace": set.pace,
-                    "cpuMs": {"draw": draw_ms, "sim": sim_ms, "interface": ui_ms, "interfaceDraw": ui_draw_ms, "place": cpu_part[0], "sunPass": cpu_part[1], "city": cpu_part[2], "models": cpu_part[3]},
+                    "cpuMs": {"draw": draw_ms, "sim": sim_ms, "interface": ui_ms, "interfaceDraw": ui_draw_ms, "joinWait": joined_ms, "horizon": horizon_ms, "place": cpu_part[0], "sunPass": cpu_part[1], "city": cpu_part[2], "models": cpu_part[3]},
                     "gpuMs": if set.profile { json!(gpu_ms) } else { Value::Null },
                     "city": {"draws": stats.draws, "tris": {"wall": stats.tris[0], "solid": stats.tris[1], "instanced": stats.tris[2], "sun": sun_tris}, "places": stats.places},
                     "near": {"slots": [filled, slots], "reads": city.near.reads, "mb": city.near.bytes as f32 / 1e6, "starved": city.near.starved},

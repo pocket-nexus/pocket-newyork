@@ -12,6 +12,8 @@ use std::time::{Duration, Instant};
 
 use ny_pack::Heights;
 use ny_sim::math::V3;
+
+use crate::horizon::Coarse;
 use vita2d_sys as g;
 
 const IDLE: u32 = 0;
@@ -45,9 +47,16 @@ struct Shared {
     state: AtomicU32,
     /// Hundredths of a millisecond the last read and sweep took.
     took: AtomicU32,
+    /// The window's heights at 8 m, each the lowest of what stands on it: the street's occluders (`horizon.rs`).
+    coarse: Mutex<Option<Arc<Coarse>>>,
 }
 
 impl Shared {
+    /// The world x and z of a window's north-west corner.
+    fn origin(&self, at: [i32; 2]) -> (f32, f32) {
+        (self.head.x0 + at[0] as f32 * self.head.step, self.head.z0 + at[1] as f32 * self.head.step)
+    }
+
     /// Reads the window's heights (cells outside the grid stand at 0), sweeps them in ordinary memory, where the
     /// sweep's own reads are fast, then copies to the texture.
     unsafe fn sweep(&self, file: &mut File, heights: &mut [u16], scratch: &mut [u16], job: Job) {
@@ -73,6 +82,24 @@ impl Shared {
             for k in 0..n {
                 dst[at + k] = u16::from_le_bytes([row[k * 2], row[k * 2 + 1]]);
             }
+        }
+        if self.coarse.lock().map(|c| c.as_ref().map(|c| (c.x0, c.z0))).ok().flatten() != Some(self.origin(job.at)) {
+            let k = 4;
+            let side = SIDE / k;
+            let mut low = vec![0.0f32; side * side];
+            for j in 0..side {
+                for i in 0..side {
+                    let mut m = u16::MAX;
+                    for jj in 0..k {
+                        for ii in 0..k {
+                            m = m.min(heights[(j * k + jj) * SIDE + i * k + ii]);
+                        }
+                    }
+                    low[j * side + i] = m as f32 * self.head.unit;
+                }
+            }
+            let (x0, z0) = self.origin(job.at);
+            *self.coarse.lock().unwrap() = Some(Arc::new(Coarse { x0, z0, step: self.head.step * k as f32, side, low }));
         }
         let l = job.light;
         ny_sim::shadow::sweep(heights, SIDE, SIDE, scratch, SIDE, l.x, l.y, l.z, self.head.step, self.head.unit);
@@ -111,7 +138,7 @@ impl Shadows {
             g::sceGxmTextureSetUAddrMode(&mut textures[k], g::SceGxmTextureAddrMode_SCE_GXM_TEXTURE_ADDR_CLAMP);
             g::sceGxmTextureSetVAddrMode(&mut textures[k], g::SceGxmTextureAddrMode_SCE_GXM_TEXTURE_ADDR_CLAMP);
         }
-        let shared = Arc::new(Shared { head, offset, path: path.to_string(), targets: [Target(targets[0]), Target(targets[1])], job: Mutex::new(None), state: AtomicU32::new(IDLE), took: AtomicU32::new(0) });
+        let shared = Arc::new(Shared { head, offset, path: path.to_string(), targets: [Target(targets[0]), Target(targets[1])], job: Mutex::new(None), state: AtomicU32::new(IDLE), took: AtomicU32::new(0), coarse: Mutex::new(None) });
         let first = Job { light, at: Self::window_at(&head, eye), target: 0 };
         // The first sweep before the first frame.
         let mut file = File::open(path).map_err(|e| format!("{path}: {e}"))?;
@@ -190,6 +217,11 @@ impl Shadows {
     /// Metres of height in one unit of the texture as a program reads it (0..1).
     pub fn unit(&self) -> f32 {
         65535.0 * self.shared.head.unit
+    }
+
+    /// The street's occluders around the window the sweep last read.
+    pub fn coarse(&self) -> Option<Arc<Coarse>> {
+        self.shared.coarse.lock().ok().and_then(|c| c.clone())
     }
 
     /// Milliseconds the last read and sweep took.

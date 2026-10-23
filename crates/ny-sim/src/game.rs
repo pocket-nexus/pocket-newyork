@@ -91,6 +91,18 @@ pub struct Game {
     pub highway_on: bool,
 }
 
+/// What a frame's world step takes from its `Game::step_now`.
+#[derive(Clone, Copy, Debug)]
+pub struct WorldStep {
+    pub dt: f32,
+    pub clock: f32,
+    pub focus: [f32; 2],
+    pub sight: Sight,
+    pub player: PlayerTraffic,
+    pub on_road: PlayerOnRoad,
+    pub fly: bool,
+}
+
 impl Game {
     /// A game over a stand-in world with no buildings and no streets (`World::stand_in`), for a tool that has no
     /// pack: the taxi at the reference's start on 5th Avenue by 37th Street, at golden hour.
@@ -148,7 +160,18 @@ impl Game {
         true
     }
 
+    /// A frame: the players and the cameras (`step_now`), then the world's traffic, people and highway
+    /// (`step_world`), then the player pushed off a car it ran into (`push_player`).
     pub fn step(&mut self, input: &Input, dt: f32) {
+        if let Some(w) = self.step_now(input, dt) {
+            self.step_world(&w);
+            self.push_player(&w);
+        }
+    }
+
+    /// The players and the cameras for a frame, and (with the traffic on) what the world's step then needs. A device
+    /// may run `step_world` alongside its drawing and push the player at its next frame.
+    pub fn step_now(&mut self, input: &Input, dt: f32) -> Option<WorldStep> {
         let dt = dt.clamp(0.001, 0.05);
         self.clock += dt;
         self.players.active = self.mode;
@@ -166,42 +189,51 @@ impl Game {
         self.cameras.orbit(input.orbit, dt);
         self.cameras.update(&self.world, &self.players, dt, self.clock);
         self.camera = self.cameras.preset;
-        if self.traffic_on {
-            let body = *self.players.active_body();
-            let (half_w, half_l) = match self.mode {
-                Mode::Cycle => (0.35, 0.85),
-                Mode::Walk => (0.32, 0.32),
-                _ => (0.86, 2.18),
-            };
-            let mut vx = sinf(body.heading) * body.speed;
-            let mut vz = cosf(body.heading) * body.speed;
-            if self.mode == Mode::Drive {
-                vx += self.players.car.vx;
-                vz += self.players.car.vz;
-            }
-            let player = PlayerTraffic { active: self.mode != Mode::Fly && body.pos.y < 2.6, x: body.pos.x, z: body.pos.z, vx, vz, half_w, half_l };
-            let v = self.view();
-            let half_v = v.fov.to_radians() * 0.5;
-            let half_fov = libm::atanf(libm::tanf(half_v) * (960.0 / 544.0));
-            let sight = Sight { eye: v.eye, dir: (v.look - v.eye).normalize(), half_fov };
-            let focus = [self.cameras.pos.x, self.cameras.pos.z];
-            self.traffic.step(&self.world, dt, self.clock, focus, &sight, &player);
-            if self.crowd_on {
-                self.crowd.step(&self.world, &mut self.traffic, dt, self.clock, focus, &sight);
-            }
-            let on_road = PlayerOnRoad { x: body.pos.x, y: body.pos.y, z: body.pos.z, vx, vz };
-            if self.highway_on {
-                self.highway.step(&self.world, dt, if self.mode == Mode::Fly { None } else { Some(&on_road) });
-            }
-            // The player is pushed off a car it ran into, and loses most of its speed
-            if player.active {
-                let b = self.players.body_mut(self.mode);
-                let (mut x, mut z) = (b.pos.x, b.pos.z);
-                if self.traffic.push_player(&mut x, &mut z, b.heading, half_w, half_l).is_some() {
-                    b.pos.x = x;
-                    b.pos.z = z;
-                    b.speed *= 0.5;
-                }
+        if !self.traffic_on {
+            return None;
+        }
+        let body = *self.players.active_body();
+        let (half_w, half_l) = match self.mode {
+            Mode::Cycle => (0.35, 0.85),
+            Mode::Walk => (0.32, 0.32),
+            _ => (0.86, 2.18),
+        };
+        let mut vx = sinf(body.heading) * body.speed;
+        let mut vz = cosf(body.heading) * body.speed;
+        if self.mode == Mode::Drive {
+            vx += self.players.car.vx;
+            vz += self.players.car.vz;
+        }
+        let player = PlayerTraffic { active: self.mode != Mode::Fly && body.pos.y < 2.6, x: body.pos.x, z: body.pos.z, vx, vz, half_w, half_l };
+        let v = self.view();
+        let half_v = v.fov.to_radians() * 0.5;
+        let half_fov = libm::atanf(libm::tanf(half_v) * (960.0 / 544.0));
+        let sight = Sight { eye: v.eye, dir: (v.look - v.eye).normalize(), half_fov };
+        let focus = [self.cameras.pos.x, self.cameras.pos.z];
+        let on_road = PlayerOnRoad { x: body.pos.x, y: body.pos.y, z: body.pos.z, vx, vz };
+        Some(WorldStep { dt, clock: self.clock, focus, sight, player, on_road, fly: self.mode == Mode::Fly })
+    }
+
+    /// The world's traffic, people and highway for a frame `step_now` recorded.
+    pub fn step_world(&mut self, w: &WorldStep) {
+        self.traffic.step(&self.world, w.dt, w.clock, w.focus, &w.sight, &w.player);
+        if self.crowd_on {
+            self.crowd.step(&self.world, &mut self.traffic, w.dt, w.clock, w.focus, &w.sight);
+        }
+        if self.highway_on {
+            self.highway.step(&self.world, w.dt, if w.fly { None } else { Some(&w.on_road) });
+        }
+    }
+
+    /// The player is pushed off a car it ran into, and loses most of its speed.
+    pub fn push_player(&mut self, w: &WorldStep) {
+        if w.player.active {
+            let b = self.players.body_mut(self.mode);
+            let (mut x, mut z) = (b.pos.x, b.pos.z);
+            if self.traffic.push_player(&mut x, &mut z, b.heading, w.player.half_w, w.player.half_l).is_some() {
+                b.pos.x = x;
+                b.pos.z = z;
+                b.speed *= 0.5;
             }
         }
     }

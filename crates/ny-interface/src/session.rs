@@ -270,6 +270,13 @@ impl Session {
 
     /// One frame of `dt` seconds: the pad (or the interface's controls) moves the player, and the game steps.
     pub fn run(&mut self, game: &mut Game, pad: &Pad, dt: f32) {
+        self.handle(game, pad, dt);
+        let input = self.input(pad, dt);
+        game.step(&input, dt);
+    }
+
+    /// The pad's presses for a frame: the modes, the hour, the camera.
+    fn handle(&mut self, game: &mut Game, pad: &Pad, dt: f32) {
         let pressed = pad.buttons & !self.prev_buttons;
         self.prev_buttons = pad.buttons;
         self.frames = self.frames.wrapping_add(1);
@@ -298,8 +305,13 @@ impl Session {
                 game.set_camera((game.camera + 1) % self.cameras);
             }
         }
+    }
+
+    /// As `run`, the world's step left to the caller (`Game::step_world`, then `Game::push_player`).
+    pub fn run_now(&mut self, game: &mut Game, pad: &Pad, dt: f32) -> Option<ny_sim::game::WorldStep> {
+        self.handle(game, pad, dt);
         let input = self.input(pad, dt);
-        game.step(&input, dt);
+        game.step_now(&input, dt)
     }
 
     /// Writes what the interface is shown. The numbers in play are refreshed every `numbers_every` frames; where the

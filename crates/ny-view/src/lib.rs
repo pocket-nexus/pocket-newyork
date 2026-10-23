@@ -124,8 +124,9 @@ fn all(t: &Tables, first: u32, count: u32, cell: u32, out: &mut Vec<Item>) {
 
 /// Chooses this frame's draws. `ready(cell)`: whether a cell's record of `NEAR` is in memory; a cell within the
 /// near reach whose record is not is drawn at the mid level, and `wanted` hears of it (with its distance), so the
-/// runtime reads it.
-pub fn select(t: &Tables, planes: &Planes, eye: [f32; 3], reach: &Reach, ready: &dyn Fn(u32) -> bool, wanted: &mut dyn FnMut(u32, f32), out: &mut Vec<Item>) -> Counts {
+/// runtime reads it. `seen(min, max)`: whether anything of a box is in sight past what stands nearer (a block of the
+/// far or mid level, a cell); what is not is not drawn.
+pub fn select(t: &Tables, planes: &Planes, eye: [f32; 3], reach: &Reach, ready: &dyn Fn(u32) -> bool, wanted: &mut dyn FnMut(u32, f32), seen: &dyn Fn([f32; 3], [f32; 3]) -> bool, out: &mut Vec<Item>) -> Counts {
     let c = t.city;
     let mut counts = Counts::default();
     let (bc, rb) = (c.block_cells, c.region_blocks);
@@ -142,13 +143,6 @@ pub fn select(t: &Tables, planes: &Planes, eye: [f32; 3], reach: &Reach, ready: 
             }
             let dr = dist(eye, rmin, rmax);
             if dr >= reach.far {
-                continue;
-            }
-            if dr >= reach.mid {
-                if r.far.count > 0 {
-                    counts.places[2] += 1;
-                    all(t, r.far.first, r.far.count, RESIDENT, out);
-                }
                 continue;
             }
             let mut far_blocks = [false; 64];
@@ -168,12 +162,17 @@ pub fn select(t: &Tables, planes: &Planes, eye: [f32; 3], reach: &Reach, ready: 
                     if d >= reach.far {
                         continue;
                     }
-                    if d >= reach.mid {
+                    let block = &t.blocks[(bz * bxn + bx) as usize];
+                    // (as high as its mid level stands; a block with none, as high as anything)
+                    let (hmin, hmax) = if block.mid.count > 0 { ([bmin[0], block.min[1], bmin[2]], [bmax[0], block.max[1], bmax[2]]) } else { (bmin, bmax) };
+                    if !seen(hmin, hmax) {
+                        continue;
+                    }
+                    if d >= reach.mid || dr >= reach.mid {
                         far_blocks[(j * rb + i) as usize] = true;
                         any_far = true;
                         continue;
                     }
-                    let block = &t.blocks[(bz * bxn + bx) as usize];
                     if d >= reach.near {
                         if block.mid.count > 0 {
                             counts.places[1] += 1;
@@ -210,7 +209,7 @@ pub fn select(t: &Tables, planes: &Planes, eye: [f32; 3], reach: &Reach, ready: 
                                 any_mid = true;
                                 continue;
                             }
-                            if !visible(planes, cell.min, cell.max) {
+                            if !visible(planes, cell.min, cell.max) || !seen(cell.min, cell.max) {
                                 continue;
                             }
                             counts.places[0] += 1;
