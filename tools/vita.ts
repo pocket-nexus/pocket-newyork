@@ -8,6 +8,7 @@
 //   bun tools/vita.ts status | capture [--out f.png]
 //   bun tools/vita.ts ctl '{"hour":3}'            # host0:newyork/control.json
 //   bun tools/vita.ts boot '{"title":false}'      # host0:newyork/boot.json, read at start
+//   bun tools/vita.ts bench [--seconds 60] [--mode title|play]  # frame timings → .pocket-build/validation/bench/
 //
 // `--share DIR` (or NY_SHARE) uses an already-running USB host's root directory instead of this repository's
 // `.pocket-build/vita-usb/share`. The default title is Pocket Devkit (PocketJS apps/devkit), the development
@@ -158,6 +159,45 @@ export function status(argv: string[]): any {
   }
 }
 
+/**
+ * Frame timings over a window: the flow is put in `--mode` (the title by default, where the reference's
+ * auto-director flies its aerial camera over the city) and the status records are read every half second.
+ * Writes `.pocket-build/validation/bench/<time>.json`.
+ */
+export async function bench(argv: string[]): Promise<void> {
+  const seconds = Number(value(argv, "--seconds", "60"));
+  const mode = value(argv, "--mode", "title");
+  ctl(argv, JSON.stringify({ mode, nonce: Date.now() }));
+  await Bun.sleep(3000);
+  const first = status(argv).engine;
+  const samples: any[] = [];
+  const t0 = Date.now();
+  while (Date.now() - t0 < seconds * 1000) {
+    await Bun.sleep(500);
+    try {
+      const e = status(argv).engine;
+      samples.push({ t: (Date.now() - t0) / 1000, frameMs: e.frameMs, worstMs: e.worstMs, late: e.late, draws: e.city?.draws, tris: e.city?.tris, near: e.near, cpu: e.cpuMs, camera: e.camera?.pos });
+    } catch {}
+  }
+  const last = status(argv).engine;
+  const tris = samples.map((x) => (x.tris ? x.tris.wall + x.tris.solid + x.tris.instanced : 0)).filter((x) => x > 0);
+  const result = {
+    seconds,
+    mode,
+    frames: last.frames - first.frames,
+    late: last.late - first.late,
+    lateBy: last.lateBy,
+    worstMs: Math.max(...samples.map((x) => x.worstMs ?? 0)),
+    triangles: { min: Math.min(...tris), max: Math.max(...tris), mean: Math.round(tris.reduce((a, b) => a + b, 0) / Math.max(1, tris.length)) },
+    draws: Math.max(...samples.map((x) => x.draws ?? 0)),
+    samples,
+  };
+  const out = resolve(ROOT, ".pocket-build/validation/bench", `${new Date().toISOString().replace(/[:.]/g, "-")}.json`);
+  mkdirSync(resolve(out, ".."), { recursive: true });
+  writeFileSync(out, JSON.stringify(result, null, 1));
+  console.log(`newyork: ${result.frames} frames in ${seconds} s, ${result.late} late, worst ${result.worstMs.toFixed(1)} ms, ${result.triangles.min}–${result.triangles.max} triangles (mean ${result.triangles.mean}), up to ${result.draws} draws → ${out}`);
+}
+
 if (import.meta.main) {
   const [command, ...argv] = process.argv.slice(2);
   switch (command) {
@@ -190,8 +230,11 @@ if (import.meta.main) {
     case "boot":
       boot(argv, argv.find((a) => a.startsWith("{")) ?? "{}");
       break;
+    case "bench":
+      await bench(argv);
+      break;
     default:
-      console.error("usage: bun tools/vita.ts build | sync | native | serve | status | capture | ctl JSON | boot JSON");
+      console.error("usage: bun tools/vita.ts build | sync | native | serve | status | capture | ctl JSON | boot JSON | bench");
       process.exit(1);
   }
 }

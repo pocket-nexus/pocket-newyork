@@ -255,7 +255,16 @@ struct Settings {
     interface: bool,
     /// A fixed eye (position, target, fov), for captures and measurements; `None` follows the game.
     view: Option<(V3, V3, f32)>,
+    /// Triangles a frame may draw: the reaches of the levels of detail follow it (and the GPU).
+    budget: u32,
+    govern: bool,
+    /// The reaches when the budget allows them in full.
+    full: Reach,
 }
+
+/// Seconds a frame may wait for the GPU to finish the frame before last, before the governor draws the levels of
+/// detail in.
+const BEHIND: f32 = 0.006;
 
 /// A control message's `press`: a mask of PocketJS button bits, or names.
 fn press(ui: &mut interface::Ui, v: &Value) {
@@ -294,9 +303,17 @@ fn apply_control(v: &Value, s: &mut Settings, game: &mut Game, session: &mut Ses
     s.show.walls = flag("walls", s.show.walls);
     s.show.solids = flag("solids", s.show.solids);
     s.show.instances = flag("instances", s.show.instances);
-    s.show.reach.near = num("near", s.show.reach.near);
-    s.show.reach.mid = num("mid", s.show.reach.mid);
-    s.show.reach.detail = num("detail", s.show.reach.detail);
+    // `near`, `mid` and `detail` set the reaches outright and stop the governor; `budget` hands them back to it.
+    if v.get("near").is_some() || v.get("mid").is_some() || v.get("detail").is_some() {
+        s.show.reach.near = num("near", s.show.reach.near);
+        s.show.reach.mid = num("mid", s.show.reach.mid);
+        s.show.reach.detail = num("detail", s.show.reach.detail);
+        s.govern = false;
+    }
+    if let Some(x) = v["budget"].as_u64() {
+        s.budget = x as u32;
+        s.govern = true;
+    }
     if let Some(x) = v["pace"].as_i64() {
         s.pace = (x as i32).clamp(1, 4);
     }
@@ -529,7 +546,12 @@ fn main() {
             pace: boot["pace"].as_i64().unwrap_or(1) as i32,
             interface: true,
             view: None,
+            budget: 200_000,
+            govern: true,
+            full: Reach { detail: 110.0, near: 260.0, mid: 1400.0 },
         };
+        let mut scale = 1.0f32;
+        let mut hold = 0u32;
 
         let ctx = g::vita2d_get_context();
         let mut timing = Timing { ms: [16.7; Timing::N], at: 0, late: 0, frames: 0 };
@@ -621,6 +643,7 @@ fn main() {
             let slot = (frame_no % 2) as usize;
             // This slot's vertices were last used two frames ago: the GPU must be done with them.
             fence.wait(slot);
+            let waited = t2.elapsed();
             g::vita2d_pool_reset();
             if slot == 1 {
                 g::vita2d_pool_malloc(POOL_BYTES / 2);
@@ -679,7 +702,26 @@ fn main() {
                 fence.wait(slot);
                 gpu_ms = gpu_ms * 0.9 + tg.elapsed().as_secs_f32() * 100.0;
             }
-            let worked = t_frame.elapsed();
+            // The reaches follow the triangle budget: in quickly when a frame draws too many, out slowly when there is
+            // room; they also come in when this frame had to wait for the GPU, and stay in for two seconds after.
+            if set.govern {
+                let drawn = stats.tris[0] + stats.tris[1] + stats.tris[2];
+                let behind = !set.profile && waited.as_secs_f32() > BEHIND;
+                if behind {
+                    hold = 120;
+                }
+                if drawn > set.budget {
+                    scale *= 0.97;
+                } else if behind {
+                    scale *= 0.985;
+                } else if (drawn as f32) < set.budget as f32 * 0.88 && hold == 0 {
+                    scale *= 1.008;
+                }
+                hold = hold.saturating_sub(1);
+                scale = scale.clamp(0.3, 1.0);
+                set.show.reach = Reach { detail: set.full.detail * scale.max(0.6), near: set.full.near * scale, mid: set.full.mid * scale };
+            }
+            let worked = t_frame.elapsed().saturating_sub(waited);
             g::vita2d_swap_buffers();
             while refreshes(sceDisplayGetVcount(), last_vcount) < set.pace {
                 sceDisplayWaitVblankStart();
@@ -722,6 +764,7 @@ fn main() {
                     "camera": {"pos": [eye.x, eye.y, eye.z], "target": [target.x, target.y, target.z], "fov": fov},
                     "game": {"player": r.mode.name(), "hour": game.hour.index(), "camera": game.camera, "mph": r.mph, "at": r.at, "label": game.label()},
                     "settings": {"near": set.show.reach.near, "mid": set.show.reach.mid, "detail": set.show.reach.detail, "profile": set.profile, "view": set.view.is_some()},
+                    "governor": {"on": set.govern, "budget": set.budget, "scale": scale, "held": hold},
                     "programs": {"compiled": gpu.compiled, "cached": gpu.cached},
                     "shadows": {"sweeps": shadows.sweeps, "sweepMs": shadows.sweep_ms()},
                     "msaa": samples,
