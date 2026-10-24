@@ -14,7 +14,9 @@ The city is modelled once, as the reference's three.js scene that runs in a brow
 - **`ui/`** is the interface: one PocketJS app drawn over the city. **`crates/ny-interface`** is the renderer's side of it and the flow around play (the title, play, the menu).
 - **`vita/`** draws a pack on the PS Vita through GXM.
 
-PocketJS (pinned in `vendor/pocketjs`) supplies the device toolchains, the dev host, the GXM kernel and packaging, the Pocket3D title card at launch and **the app icon in the console's launcher** (`vendor/pocketjs/engine/pocket3d/icon/`). This repository holds no icon file.
+PocketJS (pinned in `vendor/pocketjs`) supplies the device toolchains, the dev host, the GXM kernel and packaging, the Pocket3D title card at launch and **the app icon in the console's launcher** (`vendor/pocketjs/engine/pocket3d/icon/`). This repository holds no icon file; the LiveArea pictures (`vita/assets/sce_sys/livearea/`) are captures of the game on the console.
+
+The standalone package carries the pack, the interface and **the 48 programs a development run lists** in the share's `gxp/manifest.txt` (a run with no `defines` in `boot.json`; `vpk` refuses one with them). A console with `ur0:data/libshacccg.suprx` compiles a missing program without a trace, and the development build caches its programs in the same folder the package reads first, so a run on such a console does not prove the set complete: the manifest does.
 
 ## From the reference to a frame
 
@@ -25,6 +27,8 @@ cargo run --release -p ny-cook              # SceneIR → .pocket-build/scene/vi
 bun tools/ui.ts vita                        # the interface for the Vita
 bun tools/vita.ts native                    # build, sync the pack and the interface, replace the binary Pocket Devkit runs
 bun tools/vita.ts bench                     # frame timings over the title's aerial camera → .pocket-build/validation/bench/
+bun tools/vita.ts vpk                       # the standalone package (PKNY00001): pack, interface, the device's programs
+bun tools/vita.ts push-vpk                  # the running development build copies it to ux0:data/pocket-newyork/
 bun tools/newyork.ts view                   # a pack in a browser tab, for looking at what the compiler made
 bun tools/newyork.ts look                   # the reference itself, in Chrome over WebGPU, for comparison
 ```
@@ -40,7 +44,7 @@ The reference imports three.js from its dev branch on a CDN; `THREE_COMMIT` in `
 - **Facade pages** (`bake.js`): a box-local facade material lays a wall out in bays and storeys (`facadeCell`); each is drawn flat by the reference's own `createFacadeBoxes`, by day and by night: the upper storeys of a street front and a rear wall, the ground storey of a shop, an entrance and a rear wall, windowless walls, the corner piers of masonry. 80 pages of 10 materials.
 - **Ground pictures**: the sidewalk's flags, the asphalt and its manholes, park paving and lawn, each from straight above over a square its pattern repeats in, folded at its edges so that it repeats without a seam.
 - **The leaves**: the trees' leaf atlas through the tree material's colour graph.
-- **What moves** (`models.js`): the reference's own stand-in cars (drawn there past 30 m), the bus, and the player's taxi, bicycle and helicopter, each vertex probed with white and with black paint so the compiler knows what of it is paint.
+- **What moves** (`models.js`): the reference's own stand-in cars (drawn there past 30 m), the bus, and the player's taxi, bicycle and helicopter, each vertex probed with white and with black paint so the compiler knows what of it is paint. The helicopter's two rotors are models of their own in the frame of the pivot each turns about, their blades cut where the material's yellow tips begin and end.
 - **Signs and billboards** (`bake.js`): every material that shows a picture over its texture coordinates (Times Square's billboards, shop signs, street-name blades) drawn flat through its own colour graph.
 - **The light** (`light.js`): per hour, a white diffuse sphere drawn under the reference's lights and environment, its linear radiance read back and fitted as a hemisphere and the sun; the reference's sky as a panorama, graded and tone-mapped as its post-processing does; the haze's colour over the horizon by angle to the sun; the sky a surface reflects; and the grade and ACES of a grey fitted as one rational curve (within 0.013 of the display's value).
 - **The world** (`world.js`, `sim.js`, `map.js`): the hours read back from the reference's lighting, its places, cameras and street names, its colliders and road network, and its map of the island.
@@ -65,7 +69,7 @@ The reference imports three.js from its dev branch on a CDN; `THREE_COMMIT` in `
 - **Shadows near the eye.** Besides the height grid's sweep, a 1 024² depth map of a 320 m square the sun looks down on is drawn before each frame from the near cells and what moves (trees, lamp posts, awnings, cars and people cast shadows, buildings' have edges); every program takes the darker of the two.
 - **What the street hides is not drawn.** A horizon around the eye, from the height grid's 8 m cells at their lowest within 256 m, leaves out the mid and far blocks (and near cells) nothing of which rises over it: from street level most of the city behind the avenue's walls.
 - **Night.** The lamps' pools are the reference's cobra-head spotlights (88 cd, 0.96 rad, 25 m); everything lit takes them, and the light they leave around (the pools over ~80 m); wet ground mirrors them by Fresnel, wetness and smoothness. The reference's bloom runs at every hour, and the sun has its disc.
-- **What moves** is drawn from the game each frame: the traffic's cars (the reference's full cars within 40 m, its stand-ins past that) under pictures of themselves seen along each axis, those in view to 450 m; the sidewalks' people (the nearest 24 within 70 m, the near figure within 15 m) at their heights and in their coats; the highway's cars; and the player's vehicle. The traffic, the people and the highway step on a thread of their own alongside the frame.
+- **What moves** is drawn from the game each frame: the traffic's cars (the reference's full cars within 40 m, its stand-ins past that) under pictures of themselves seen along each axis, those in view to 450 m; the sidewalks' people (the nearest 24 within 70 m, the near figure within 15 m) at their heights and in their coats; the highway's cars; and the player's vehicle. The helicopter's rotors turn at the reference's 24 and 32 radians a second: at 30 frames a second the main rotor turns 46° a frame, half the way to the next blade, so each rotor is drawn eight times through the angle it swept since the frame before, the leading copy whole and the rest fading behind it. The traffic, the people and the highway step on a thread of their own alongside the frame.
 - **The interface** is the PocketJS guest of `ui/`, drawn over the city.
 - **The Pocket3D title card** plays first.
 
@@ -88,7 +92,7 @@ Beside the reference from the same eye (`bun tools/newyork.ts look --eye x,y,z -
 - **Roofs** past the near level are flat and bluish: the reference draws rooftop plant (water towers, bulkheads, chillers) within 560 m, and here only the near level carries it.
 - **Leaves** past the sun's map have no shadow, and near crowns cost the most of a street frame (their cards are cut, so the GPU shades every layer).
 - **Not drawn yet:** the steam, the headlights' beams, the highway's lamp flares, the soft shadow under a car.
-- **Not done:** the Pocket3D Demo row, LiveArea pictures, a package.
+- **Not done:** the Pocket3D Demo row.
 
 ## The interface
 

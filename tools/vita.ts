@@ -9,6 +9,8 @@
 //   bun tools/vita.ts ctl '{"hour":3}'            # host0:newyork/control.json
 //   bun tools/vita.ts boot '{"title":false}'      # host0:newyork/boot.json, read at start
 //   bun tools/vita.ts bench [--seconds 60] [--mode title|play]  # frame timings → .pocket-build/validation/bench/
+//   bun tools/vita.ts vpk                         # standalone PKNY00001 package: pack, interface, programs inside
+//   bun tools/vita.ts push-vpk [file.vpk]         # the running build copies it to ux0:data/pocket-newyork/
 //
 // `--share DIR` (or NY_SHARE) uses an already-running USB host's root directory instead of this repository's
 // `.pocket-build/vita-usb/share`. The default title is Pocket Devkit (PocketJS apps/devkit), the development
@@ -16,7 +18,7 @@
 
 import { $ } from "bun";
 import { createHash, randomBytes } from "node:crypto";
-import { cpSync, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { packageVitaVpk } from "../vendor/pocketjs/tools/vita-package.ts";
 import { prepareVitaUsb } from "../vendor/pocketjs/tools/vita-usb.ts";
@@ -131,6 +133,54 @@ export async function sync(argv: string[]): Promise<void> {
   }
 }
 
+/**
+ * The standalone package: the pack, the interface and the programs the device compiled (listed in the share's
+ * `gxp/manifest.txt` by a development run with no `defines` in `boot.json`) go inside the VPK beside the LiveArea
+ * pictures, and the build carries no USB debug driver.
+ */
+export async function vpk(argv: string[]): Promise<void> {
+  const c = context(argv);
+  const manifest = `${c.appShare}/gxp/manifest.txt`;
+  if (!existsSync(manifest)) throw new Error(`${manifest} missing: run the development build on the device first`);
+  const boot = existsSync(`${c.appShare}/boot.json`) ? JSON.parse(readFileSync(`${c.appShare}/boot.json`, "utf8")) : {};
+  if (boot.defines?.length) throw new Error(`boot.json has defines (${boot.defines}): the manifest lists probe programs`);
+  const stage = resolve(ROOT, ".pocket-build/vpk");
+  rmSync(stage, { recursive: true, force: true });
+  mkdirSync(`${stage}/gxp`, { recursive: true });
+  cpSync(`${APP_DIR}/assets`, stage, { recursive: true });
+  const hashes = [...new Set(readFileSync(manifest, "utf8").split("\n").filter(Boolean))];
+  for (const h of hashes) {
+    const gxp = `${c.appShare}/gxp/${h}.gxp`;
+    if (!existsSync(gxp)) throw new Error(`${gxp} missing: the device has not compiled this build's programs`);
+    cpSync(gxp, `${stage}/gxp/${h}.gxp`);
+  }
+  cpSync(packPath(argv), `${stage}/city.pack`);
+  await $`bun ${ROOT}/tools/ui.ts vita`.cwd(ROOT).quiet();
+  for (const name of INTERFACE) cpSync(resolve(ROOT, ".pocket-build/ui/vita", name), `${stage}/${name}`);
+  console.log(`newyork: staged ${hashes.length} programs, the pack and the interface in ${stage}`);
+  await build([...argv.filter((a) => a !== "--standalone"), "--standalone"], stage);
+}
+
+/** Copies a standalone package to the console's card through the running development build, for VitaShell. */
+async function pushVpk(argv: string[]): Promise<void> {
+  const c = context(argv);
+  const file = resolve(argv.find((a) => a.endsWith(".vpk")) ?? `${OUT_DIR}/pocket-newyork-PKNY00001.vpk`);
+  const name = file.split("/").pop()!;
+  mkdirSync(`${c.appShare}/outbox`, { recursive: true });
+  rmSync(`${c.appShare}/outbox/${name}.done`, { force: true });
+  cpSync(file, `${c.appShare}/outbox/${name}`);
+  ctl(argv, JSON.stringify({ fetch: name, nonce: Date.now() }));
+  const done = `${c.appShare}/outbox/${name}.done`;
+  for (let i = 0; i < 1200; i++) {
+    await Bun.sleep(500);
+    if (existsSync(done)) {
+      console.log(`newyork: ${readFileSync(done, "utf8")}`);
+      return;
+    }
+  }
+  throw new Error("the device did not confirm the copy");
+}
+
 export function ctl(argv: string[], json: string): void {
   const c = context(argv);
   mkdirSync(c.appShare, { recursive: true });
@@ -233,8 +283,14 @@ if (import.meta.main) {
     case "bench":
       await bench(argv);
       break;
+    case "vpk":
+      await vpk(argv);
+      break;
+    case "push-vpk":
+      await pushVpk(argv);
+      break;
     default:
-      console.error("usage: bun tools/vita.ts build | sync | native | serve | status | capture | ctl JSON | boot JSON | bench");
+      console.error("usage: bun tools/vita.ts build | sync | native | serve | status | capture | ctl JSON | boot JSON | bench | vpk | push-vpk");
       process.exit(1);
   }
 }
