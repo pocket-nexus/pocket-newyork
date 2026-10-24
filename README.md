@@ -10,9 +10,11 @@ The city is modelled once, as the reference's three.js scene that runs in a brow
 - **`crates/ny-cook`** is the scene compiler: SceneIR in, one pack out, for a device profile (`profiles/vita60.json`).
 - **`crates/ny-pack`** is the pack: tables, vertex layouts and sections shared by the compiler and the runtimes.
 - **`crates/ny-view`** is what a frame draws: the places of the pack at the level of detail their distance asks for.
+- **`crates/ny-frame`** is what a frame works out on the processor before it draws, the same on every device: the hour's light, what moves as instances, what the street hides, which cells' records to read, the shadow window and the sun's map.
 - **`crates/ny-sim`** is what moves, the same on every device: the reference's four ways through the city, its cameras, its street names, its signals, its traffic, its pedestrians and its highway's cars, compared against the reference itself.
 - **`ui/`** is the interface: one PocketJS app drawn over the city. **`crates/ny-interface`** is the renderer's side of it and the flow around play (the title, play, the menu).
 - **`vita/`** draws a pack on the PS Vita through GXM.
+- **`wgpu/`** draws the same pack in a browser tab over WebGPU, as the PS Vita draws it ([In a browser tab](#in-a-browser-tab)).
 
 PocketJS (pinned in `vendor/pocketjs`) supplies the device toolchains, the dev host, the GXM kernel and packaging, the Pocket3D title card at launch and **the app icon in the console's launcher** (`vendor/pocketjs/engine/pocket3d/icon/`). This repository holds no icon file; the LiveArea pictures (`vita/assets/sce_sys/livearea/`) are captures of the game on the console.
 
@@ -29,6 +31,9 @@ bun tools/vita.ts native                    # build, sync the pack and the inter
 bun tools/vita.ts bench                     # frame timings over the title's aerial camera → .pocket-build/validation/bench/
 bun tools/vita.ts vpk                       # the standalone package (PKNY00001): pack, interface, the device's programs
 bun tools/vita.ts push-vpk                  # the running development build copies it to ux0:data/pocket-newyork/
+bun tools/wgpu.ts serve                     # the game in a browser tab, as the PS Vita plays it: http://127.0.0.1:8804/
+bun tools/wgpu.ts check                     # Chrome: the title, each way through the city by day and by night, the menu
+bun tools/wgpu.ts dist                      # the directory a static host serves: the page and the pack in pieces
 bun tools/newyork.ts view                   # a pack in a browser tab, for looking at what the compiler made
 bun tools/newyork.ts look                   # the reference itself, in Chrome over WebGPU, for comparison
 ```
@@ -84,6 +89,22 @@ PS Vita, Pocket Devkit over USB, 30 frames a second, 2× multisampling, `bun too
 | GPU at the street, by part (reaches at the governor's floor) | trees 5.5 ms, what moves 5.1, bloom 1.8, the sun's map 1.5 |
 | CPU | the world's step off the frame (0.1 ms waited for it); the horizon 4.8 ms |
 | First launch | about 75 s, most of it copying the 377 MB pack to the memory card |
+
+## In a browser tab
+
+`wgpu/` is the game of the PS Vita build drawn with wgpu over WebGPU: the same pack, the same game (`ny-sim`, `ny-interface`, `ny-view`, `ny-frame`), the same interface bundle in PocketJS's realm, and the PS Vita's programs as WGSL, inside PocketJS's Pocket3D player (the PS Vita's shell, its keys, the title card). Two things are the browser's own:
+
+- **A vertex is read by its index.** The pack's records have attributes on any byte, which a WebGPU vertex buffer does not take; the programs read them from storage buffers (the pack's streams, the cells' records in 128 slots, this frame's models) by `vertex_index` and `instance_index`.
+- **The pack is read in ranges.** `dist` cuts it into pieces of at most 4 MiB named by their bytes (205 pieces, 243 files and 384 MB in all, within what a Pocket Studio site takes); before the first frame the tab reads the tables, the pack's own streams, the pictures, the lamps' light, what moves and a window of the heights, and a cell's record when the eye comes near.
+
+It runs at sixty frames a second at the PS Vita's full reaches with no governor, four samples a pixel and a 2 048² sun map; [`wgpu/README.md`](wgpu/README.md) lists every difference. Chrome 155 on an M3 Max, served from the same machine (`bun tools/wgpu.ts check --dist`), 2026-10-24:
+
+| | |
+| --- | --- |
+| The title, and each way through the city by day and by night, 5 s each | 59.95 to 59.96 frames a second, 0 late; 1 500 to 1 900 draws |
+| A frame's cost without the display, over 300 frames | 0.49 ms |
+| From the page's start: the interface up, the city in (the title card plays until 2.4 s) | 0.11 s, 2.47 s; 139 MB of the pack read by then |
+| The deployable directory | 243 files, 384 MB (the pack in 205 pieces) |
 
 ## Where it stands
 
