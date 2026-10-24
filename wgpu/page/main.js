@@ -21,7 +21,7 @@ import { createPlayer } from "./pocket3d-player.js";
 import init, { NewYork, shape } from "./pkg/ny_wgpu.js";
 
 // The handheld the game runs on: its screen is the renderer's and its interface the bundle under ui/vita/, as
-// the PS Vita's own build compiles it. (tools/web.test.ts holds this list, `runsOn` below, the page's
+// the PS Vita's own build compiles it. (tools/wgpu.test.ts holds this list, `runsOn` below, the page's
 // `pocket-devices` and the release's targets to one another: a device with a package is a device here.)
 const DEVICES = [{ id: "vita", label: "PS Vita", sticks: 2 }];
 // Where the interface's settings are kept between visits (a PS Vita keeps them in a file on its card).

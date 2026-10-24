@@ -1,0 +1,134 @@
+{
+  "tagline": "Slop New York's Manhattan on foot, by taxi, by bicycle or by helicopter, on the PS Vita and in a browser.",
+  "description": [
+    "Pocket New York is Slop New York, mrdoob's three.js Manhattan built from NYC Open Data and OpenStreetMap, compiled for a handheld. The island is the original's island: its streets and blocks, its buildings and their facades, its trees, lamps, signs and landmarks, from the Battery to 125th Street.",
+    "Go on foot, in a yellow taxi, on a bicycle or in a sightseeing helicopter, at the original's four hours: the golden hour, midday, the blue hour and midnight. The traffic keeps its lanes and its signals, people walk the sidewalks and cross at the crosswalks, and the highway's cars run along the rivers. The original's cameras go with it, from the chase to the Empire State Building's deck, and eight landmarks are a press away.",
+    "The light follows the original's: linear light from the sky, the ground and the sun, its grade and tone curve for each hour, its haze, its sky and its bloom. The sun's depth map gives trees, lamp posts and cars their shadows; at night the street lamps light the road and the wet asphalt mirrors them.",
+    "On a PS Vita it draws 960 × 544 at 30 frames a second with a GXM renderer of its own, in two samples a pixel, streaming the 380 MB city from the memory card. In a browser it draws the same city with a WebGPU renderer of its own, in a PS Vita's shell whose keys are the controls.",
+    "The source is MIT, as the original's is: github.com/pocket-nexus/pocket-newyork. The city's data comes from NYC Open Data and OpenStreetMap (ODbL)."
+  ],
+  "translations": {
+    "ja": {
+      "tagline": "Slop New York のマンハッタンを、歩いて、タクシーで、自転車で、ヘリコプターで。PS Vita とブラウザで。",
+      "description": [
+        "Pocket New York は、mrdoob が NYC Open Data と OpenStreetMap から three.js で作ったマンハッタン、Slop New York を携帯機向けにコンパイルしたものです。島は原作の島そのままです。通りと街区、ビルとそのファサード、街路樹、街灯、標識、ランドマークを、バッテリーから 125 丁目まで。",
+        "歩いて、黄色いタクシーで、自転車で、観光ヘリコプターで回れます。時間は原作の四つ、ゴールデンアワー、正午、ブルーアワー、真夜中です。車は車線と信号を守り、人は歩道を歩いて横断歩道を渡り、高速道路の車は川沿いを走ります。カメラも原作どおりで、追従カメラからエンパイア・ステート・ビルの展望台まで。八つのランドマークへはボタンひとつで移れます。",
+        "光は原作に合わせています。空、地面、太陽からのリニアな光に、時間ごとの原作のグレーディングとトーンカーブ、霞、空、ブルームを通します。太陽のデプスマップで街路樹や街灯や車にも影が落ち、夜は街灯が路面を照らし、濡れたアスファルトがその光を映します。",
+        "PS Vita では独自の GXM レンダラーで 960 × 544、毎秒 30 フレーム、1 ピクセルあたり 2 サンプルで描き、380 MB の街をメモリーカードから読み込みながら走ります。ブラウザでは同じ街を独自の WebGPU レンダラーで描き、PS Vita の筐体の中で、そのキーで操作します。",
+        "ソースは原作と同じく MIT です: github.com/pocket-nexus/pocket-newyork。街のデータは NYC Open Data と OpenStreetMap（ODbL）のものです。"
+      ],
+      "captions": {
+        "vita-times-square.jpg": "PS Vita の実機で撮った画面: ゴールデンアワーのタイムズスクエアを歩く。",
+        "vita-taxi.jpg": "PS Vita の実機で撮った画面: 5 番街と東 36 丁目の黄色いタクシー。",
+        "vita-bicycle.jpg": "PS Vita の実機で撮った画面: 正午、セントラルパーク近くの 6 番街を自転車で。",
+        "vita-helicopter.jpg": "PS Vita の実機で撮った画面: ミッドタウン上空の観光ヘリコプター。ローターが回る。",
+        "vita-east-river.jpg": "PS Vita の実機で撮った画面: ブルーアワーのイースト川越しのミッドタウン。",
+        "vita-times-square-night.jpg": "PS Vita の実機で撮った画面: 真夜中のタイムズスクエア。",
+        "aerial.mp4": "原作の空撮カメラで、ゴールデンアワーのミッドタウン上空を。",
+        "fifth-avenue.mp4": "ゴールデンアワーの 5 番街と東 42 丁目。信号で止まる車。",
+        "helicopter.mp4": "正午のミッドタウン上空でホバリングする観光ヘリコプター。",
+        "times-square-night.mp4": "真夜中のタイムズスクエア。スクリーンと、濡れた路面に映る街灯。",
+        "east-river.mp4": "ブルーアワーのイースト川越しのミッドタウン。"
+      }
+    }
+  },
+  "media": [
+    {
+      "kind": "video",
+      "file": "aerial.mp4",
+      "poster": "aerial.jpg",
+      "take": {
+        "seconds": 12,
+        "words": "mode=play camera=10 hour=0"
+      },
+      "caption": "The original's aerial camera over Midtown at the golden hour."
+    },
+    {
+      "kind": "video",
+      "file": "fifth-avenue.mp4",
+      "poster": "fifth-avenue.jpg",
+      "take": {
+        "seconds": 10,
+        "words": "mode=play camera=4 hour=0"
+      },
+      "caption": "5th Avenue at East 42nd Street at the golden hour, its traffic at the signals."
+    },
+    {
+      "kind": "video",
+      "file": "helicopter.mp4",
+      "poster": "helicopter.jpg",
+      "take": {
+        "seconds": 10,
+        "words": "mode=play player=helicopter place=0 camera=0 hour=1"
+      },
+      "caption": "The sightseeing helicopter hovering over Midtown at midday."
+    },
+    {
+      "kind": "video",
+      "file": "times-square-night.mp4",
+      "poster": "times-square-night.jpg",
+      "take": {
+        "seconds": 10,
+        "words": "mode=play camera=5 hour=3"
+      },
+      "caption": "Times Square at midnight: its screens, its lamps on the wet street."
+    },
+    {
+      "kind": "video",
+      "file": "east-river.mp4",
+      "poster": "east-river.jpg",
+      "take": {
+        "seconds": 10,
+        "words": "mode=play camera=9 hour=2"
+      },
+      "caption": "Midtown from across the East River at the blue hour."
+    },
+    {
+      "kind": "image",
+      "file": "vita-times-square.jpg",
+      "still": ".pocket-build/validation/vita/listing/times-walk2.png",
+      "from": "vita",
+      "caption": "Captured on a PS Vita: on foot in Times Square at the golden hour."
+    },
+    {
+      "kind": "image",
+      "file": "vita-taxi.jpg",
+      "still": ".pocket-build/validation/vita/listing/empire-taxi.png",
+      "from": "vita",
+      "caption": "Captured on a PS Vita: a yellow taxi on 5th Avenue at East 36th Street."
+    },
+    {
+      "kind": "image",
+      "file": "vita-bicycle.jpg",
+      "still": ".pocket-build/validation/vita/listing/park-bike2.png",
+      "from": "vita",
+      "caption": "Captured on a PS Vita: on a bicycle on 6th Avenue by Central Park, at midday."
+    },
+    {
+      "kind": "image",
+      "file": "vita-helicopter.jpg",
+      "still": ".pocket-build/validation/vita/livearea/heli8-h1.png",
+      "from": "vita",
+      "caption": "Captured on a PS Vita: the sightseeing helicopter over Midtown, its rotor turning."
+    },
+    {
+      "kind": "image",
+      "file": "vita-east-river.jpg",
+      "still": ".pocket-build/validation/vita/listing/skyline-screen.png",
+      "from": "vita",
+      "caption": "Captured on a PS Vita: Midtown from across the East River at the blue hour."
+    },
+    {
+      "kind": "image",
+      "file": "vita-times-square-night.jpg",
+      "still": ".pocket-build/validation/vita/listing/times-night-screen.png",
+      "from": "vita",
+      "caption": "Captured on a PS Vita: Times Square at midnight."
+    }
+  ],
+  "card": "card.jpg",
+  "cardTake": {
+    "words": "mode=play camera=10 hour=0"
+  },
+  "cover": ".pocket-build/validation/vita/livearea/title-b.png"
+}

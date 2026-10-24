@@ -34,6 +34,7 @@ bun tools/vita.ts push-vpk                  # the running development build copi
 bun tools/wgpu.ts serve                     # the game in a browser tab, as the PS Vita plays it: http://127.0.0.1:8804/
 bun tools/wgpu.ts check                     # Chrome: the title, each way through the city by day and by night, the menu
 bun tools/wgpu.ts dist                      # the directory a static host serves: the page and the pack in pieces
+bun tools/listing.ts                        # the Pocket Studio page: browser clips, the Vita's captures, the share card → dist/listing
 bun tools/newyork.ts view                   # a pack in a browser tab, for looking at what the compiler made
 bun tools/newyork.ts look                   # the reference itself, in Chrome over WebGPU, for comparison
 ```
