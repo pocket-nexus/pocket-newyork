@@ -313,6 +313,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "ny-frame"
+version = "0.1.0"
+dependencies = [
+ "libm",
+ "ny-pack",
+ "ny-sim",
+ "ny-view",
+]
+
+[[package]]
 name = "ny-interface"
 version = "0.1.0"
 dependencies = [

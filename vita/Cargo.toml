@@ -17,6 +17,7 @@ pocket3d-title = { path = "../vendor/pocketjs/engine/pocket3d/crates/pocket3d-ti
 ny-pack = { path = "../crates/ny-pack" }
 ny-sim = { path = "../crates/ny-sim" }
 ny-view = { path = "../crates/ny-view" }
+ny-frame = { path = "../crates/ny-frame" }
 # The interface (ui/): its protocol, the flow, and the channel the PocketJS guest opens in the process.
 ny-interface = { path = "../crates/ny-interface", features = ["guest"] }
 # The guest's collector is run by this runtime, at moments it chooses (`interface.rs`).

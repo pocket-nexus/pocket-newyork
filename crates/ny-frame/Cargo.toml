@@ -1,0 +1,17 @@
+[package]
+name = "ny-frame"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "What a frame of Pocket New York works out on the processor, the same on every device: the hour's light, what moves as instances, what the street hides, the cells' records to read, the shadow window and the sun's map"
+
+[features]
+default = ["std"]
+# Without `std` the crate needs only `core`, `alloc` and `libm`.
+std = ["ny-pack/std", "ny-sim/std", "ny-view/std"]
+
+[dependencies]
+libm = "0.2"
+ny-pack = { path = "../ny-pack", default-features = false }
+ny-sim = { path = "../ny-sim", default-features = false }
+ny-view = { path = "../ny-view", default-features = false }

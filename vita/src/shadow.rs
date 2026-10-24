@@ -1,5 +1,5 @@
 //! The shadows: for the hour's sun, the height below which each cell of a window of the city's height grid (`HMAP`)
-//! is in shadow (`ny_sim::shadow::sweep`), as a texture every scene program reads. A thread of its own reads the
+//! is in shadow (`ny_frame::shadow`), as a texture every scene program reads. A thread of its own reads the
 //! window around the eye from the pack and sweeps it whenever the eye has left the window's middle or the sun has
 //! moved; the frame that finds a sweep finished starts showing it.
 
@@ -10,20 +10,15 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use ny_frame::horizon::Coarse;
+use ny_frame::shadow::{self as window, SIDE};
 use ny_pack::Heights;
 use ny_sim::math::V3;
-
-use crate::horizon::Coarse;
 use vita2d_sys as g;
 
 const IDLE: u32 = 0;
 const WORKING: u32 = 1;
 const READY: u32 = 2;
-
-/// Cells along a side of the window: 2 048 m of 2 m cells.
-pub const SIDE: usize = 1024;
-/// The window moves when the eye is this far from its middle.
-const DRIFT: f32 = 320.0;
 
 struct Target(*mut u16);
 unsafe impl Send for Target {}
@@ -52,11 +47,6 @@ struct Shared {
 }
 
 impl Shared {
-    /// The world x and z of a window's north-west corner.
-    fn origin(&self, at: [i32; 2]) -> (f32, f32) {
-        (self.head.x0 + at[0] as f32 * self.head.step, self.head.z0 + at[1] as f32 * self.head.step)
-    }
-
     /// Reads the window's heights (cells outside the grid stand at 0), sweeps them in ordinary memory, where the
     /// sweep's own reads are fast, then copies to the texture.
     unsafe fn sweep(&self, file: &mut File, heights: &mut [u16], scratch: &mut [u16], job: Job) {
@@ -83,26 +73,10 @@ impl Shared {
                 dst[at + k] = u16::from_le_bytes([row[k * 2], row[k * 2 + 1]]);
             }
         }
-        if self.coarse.lock().map(|c| c.as_ref().map(|c| (c.x0, c.z0))).ok().flatten() != Some(self.origin(job.at)) {
-            let k = 4;
-            let side = SIDE / k;
-            let mut low = vec![0.0f32; side * side];
-            for j in 0..side {
-                for i in 0..side {
-                    let mut m = u16::MAX;
-                    for jj in 0..k {
-                        for ii in 0..k {
-                            m = m.min(heights[(j * k + jj) * SIDE + i * k + ii]);
-                        }
-                    }
-                    low[j * side + i] = m as f32 * self.head.unit;
-                }
-            }
-            let (x0, z0) = self.origin(job.at);
-            *self.coarse.lock().unwrap() = Some(Arc::new(Coarse { x0, z0, step: self.head.step * k as f32, side, low }));
+        if self.coarse.lock().map(|c| c.as_ref().map(|c| (c.x0, c.z0))).ok().flatten() != Some(window::origin(&self.head, job.at)) {
+            *self.coarse.lock().unwrap() = Some(Arc::new(window::coarse(heights, &self.head, job.at)));
         }
-        let l = job.light;
-        ny_sim::shadow::sweep(heights, SIDE, SIDE, scratch, SIDE, l.x, l.y, l.z, self.head.step, self.head.unit);
+        window::sweep(heights, scratch, &self.head, job.light);
         core::ptr::copy_nonoverlapping(scratch.as_ptr(), self.targets[job.target].0, SIDE * SIDE);
         self.took.store((t.elapsed().as_secs_f32() * 100_000.0) as u32, Ordering::Relaxed);
     }
@@ -139,7 +113,7 @@ impl Shadows {
             g::sceGxmTextureSetVAddrMode(&mut textures[k], g::SceGxmTextureAddrMode_SCE_GXM_TEXTURE_ADDR_CLAMP);
         }
         let shared = Arc::new(Shared { head, offset, path: path.to_string(), targets: [Target(targets[0]), Target(targets[1])], job: Mutex::new(None), state: AtomicU32::new(IDLE), took: AtomicU32::new(0), coarse: Mutex::new(None) });
-        let first = Job { light, at: Self::window_at(&head, eye), target: 0 };
+        let first = Job { light, at: window::window_at(&head, eye), target: 0 };
         // The first sweep before the first frame.
         let mut file = File::open(path).map_err(|e| format!("{path}: {e}"))?;
         let (mut heights, mut scratch) = (vec![0u16; SIDE * SIDE], vec![0u16; SIDE * SIDE]);
@@ -168,12 +142,6 @@ impl Shadows {
         Ok(Shadows { textures, at: [first.at; 2], front: 0, shared, cool: 0, asked: first, sweeps: 1 })
     }
 
-    /// The window's north-west cell that puts `eye` in its middle.
-    fn window_at(head: &Heights, eye: V3) -> [i32; 2] {
-        let half = (SIDE / 2) as f32 * head.step;
-        [((eye.x - half - head.x0) / head.step).floor() as i32, ((eye.z - half - head.z0) / head.step).floor() as i32]
-    }
-
     /// Once a frame: shows a finished sweep, and asks for a new one when the sun has moved or the eye has left the
     /// middle of the window.
     pub fn update(&mut self, light: V3, eye: V3) {
@@ -187,10 +155,9 @@ impl Shadows {
             }
             IDLE if self.cool == 0 => {
                 let h = &self.shared.head;
-                let mid = [h.x0 + (self.asked.at[0] as f32 + (SIDE / 2) as f32) * h.step, h.z0 + (self.asked.at[1] as f32 + (SIDE / 2) as f32) * h.step];
-                let moved = (eye.x - mid[0]).abs().max((eye.z - mid[1]).abs()) > DRIFT;
-                if moved || self.asked.light.dot(light) < 0.999_998_5 {
-                    self.asked = Job { light, at: if moved { Self::window_at(h, eye) } else { self.asked.at }, target: 1 - self.front };
+                let moved = window::left(h, self.asked.at, eye);
+                if moved || window::sun_moved(self.asked.light, light) {
+                    self.asked = Job { light, at: if moved { window::window_at(h, eye) } else { self.asked.at }, target: 1 - self.front };
                     *self.shared.job.lock().unwrap() = Some(self.asked);
                     self.shared.state.store(WORKING, Ordering::Release);
                 }
@@ -207,16 +174,12 @@ impl Shadows {
 
     /// From world x and z to the texture's coordinates: scale, then x and z offsets.
     pub fn mapping(&self) -> [f32; 3] {
-        let h = &self.shared.head;
-        let size = SIDE as f32 * h.step;
-        let at = self.at[self.front];
-        let (x0, z0) = (h.x0 + at[0] as f32 * h.step, h.z0 + at[1] as f32 * h.step);
-        [1.0 / size, -x0 / size, -z0 / size]
+        window::mapping(&self.shared.head, self.at[self.front])
     }
 
     /// Metres of height in one unit of the texture as a program reads it (0..1).
     pub fn unit(&self) -> f32 {
-        65535.0 * self.shared.head.unit
+        window::unit(&self.shared.head)
     }
 
     /// The street's occluders around the window the sweep last read.

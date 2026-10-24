@@ -7,16 +7,13 @@ use pocket_vita_gxm::mem::Arena;
 use pocket_vita_gxm::target::{ColorFormat, Depth, Msaa, Target};
 use vita2d_sys as g;
 
+use ny_frame::mat::Mat4;
+use ny_frame::sun::SunView;
+pub use ny_frame::sun::HALF;
 use ny_sim::math::{v3, V3};
 
-use crate::mat::Mat4;
-
-/// Texels along a side.
+/// Texels along a side: 31 cm texels.
 pub const SIDE: u32 = 1024;
-/// Metres from the middle of the square to its edges: 31 cm texels.
-pub const HALF: f32 = 160.0;
-/// Metres along the sun either side of the middle that the map's depth holds.
-const DEEP: f32 = 600.0;
 
 pub struct SunMap {
     pub target: Target,
@@ -37,43 +34,16 @@ impl SunMap {
         Ok(SunMap { target, draw: [0.0; 16], read: [0.0; 16], middle: V3::ZERO, sun: v3(0.0, 1.0, 0.0) })
     }
 
-    /// Places the square around `eye` for the sun towards `l` (a unit vector). Its middle keeps to whole texels in
-    /// the plane the sun looks down on, so that shadows do not crawl as the eye moves.
+    /// Places the square around `eye` for the sun towards `l` (a unit vector), in whole texels
+    /// (`ny_frame::sun::SunView::place`).
     pub fn place(&mut self, eye: V3, l: V3) {
-        let reference = if l.y.abs() > 0.99 { v3(0.0, 0.0, 1.0) } else { v3(0.0, 1.0, 0.0) };
-        let r = l.cross(reference).normalize();
-        let u = r.cross(l).normalize();
-        let texel = 2.0 * HALF / SIDE as f32;
-        let (a, b) = (libm::roundf(eye.dot(r) / texel) * texel, libm::roundf(eye.dot(u) / texel) * texel);
-        let along = eye.dot(l);
-        self.middle = r * a + u * b + l * along;
-        self.sun = l;
-        let (k, d) = (1.0 / (2.0 * HALF), 1.0 / (2.0 * DEEP));
-        // Depth 0 nearest the sun.
-        let depth = [-l.x * d, -l.y * d, -l.z * d, (along + DEEP) * d];
-        #[rustfmt::skip]
-        let read = [
-            r.x * k, r.y * k, r.z * k, 0.5 - a * k,
-            u.x * k, u.y * k, u.z * k, 0.5 - b * k,
-            depth[0], depth[1], depth[2], depth[3],
-            0.0, 0.0, 0.0, 1.0,
-        ];
-        #[rustfmt::skip]
-        let draw = [
-            r.x / HALF, r.y / HALF, r.z / HALF, -a / HALF,
-            u.x / HALF, u.y / HALF, u.z / HALF, -b / HALF,
-            depth[0], depth[1], depth[2], depth[3],
-            0.0, 0.0, 0.0, 1.0,
-        ];
-        self.read = read;
-        self.draw = draw;
+        let at = SunView::place(eye, l, SIDE);
+        (self.draw, self.read, self.middle, self.sun) = (at.draw, at.read, at.middle, at.sun);
     }
 
     /// Leaves the map out this frame: every point reads as outside it.
     pub fn off(&mut self) {
-        #[rustfmt::skip]
-        let read = [0.0, 0.0, 0.0, 9.0, 0.0, 0.0, 0.0, 9.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0];
-        self.read = read;
+        self.read = SunView::off().read;
     }
 
     /// Opens the map's scene, its viewport rows running with the map's y (texture row 0 at y = 0).
