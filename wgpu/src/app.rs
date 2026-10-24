@@ -17,6 +17,7 @@ use ny_frame::horizon::Horizon;
 use ny_frame::light::{bloom, frame_light, sun_disc};
 use ny_frame::mat;
 use ny_frame::movers::Movers;
+use ny_frame::trees::{Reach as TreeReach, Trees};
 use ny_frame::sun::SunView;
 use ny_interface::{channel, pad, Mode, Pace, Pad, Session};
 use ny_pack::{Instance, Preset};
@@ -45,6 +46,9 @@ const GROUND: [f32; 3] = [0.035, 0.047, 0.067];
 const WINDOW: usize = 120;
 /// The reaches of the levels of detail: the PS Vita's when its governor allows them in full.
 const REACH: Reach = Reach { detail: 160.0, near: 420.0, mid: 2400.0, far: 7000.0 };
+/// The trees drawn finer near the eye (`ny_frame::trees`): as far out as the reference draws its levels 0 (105 m)
+/// and 1 (420 m), at most 128 trees at level 0 and 900 in all.
+const TREES: TreeReach = TreeReach { fine: 105.0, fine_count: 128, reach: 420.0, count: 900 };
 
 /// The pad as the page reads it: PocketJS's bits and two sticks in −1…1, right and up positive.
 #[derive(Clone, Copy, Default)]
@@ -127,6 +131,7 @@ struct Live {
     sky: Sky,
     shadows: Shadows,
     movers: Movers,
+    trees: Trees,
     horizon: Horizon,
     placed: Vec<(usize, Instance)>,
     located: Option<Location>,
@@ -240,9 +245,10 @@ impl App {
         session.title_camera = game.world.camera_named("drone").map(|c| c as u8);
         session.places = game.world.teleports.iter().map(|t| [t.x, t.z, t.heading]).collect();
         let movers = Movers::new(|name| l.city.model(name));
+        let trees = l.city.trees();
         let read_at_start = l.city.read_so_far().bytes;
         unsafe { channel() }.state.message.clear();
-        self.live = Some(Live { presets: l.presets, game, session, city: l.city, sky: l.sky, shadows: l.shadows, movers, horizon: Horizon::new(), placed: Vec::with_capacity(crate::city::MODEL_INSTANCES), located: None, stats: Stats::default(), pack_bytes: l.pack_bytes, read_at_start });
+        self.live = Some(Live { presets: l.presets, game, session, city: l.city, sky: l.sky, shadows: l.shadows, movers, trees, horizon: Horizon::new(), placed: Vec::with_capacity(crate::city::MODEL_INSTANCES), located: None, stats: Stats::default(), pack_bytes: l.pack_bytes, read_at_start });
         self.loaded_ms = task::now() - self.opened_at;
     }
 
@@ -481,9 +487,16 @@ impl App {
         // What moves: the traffic (cars in view within the middle distance, at most 450 m), the sidewalks' people and
         // the highway's cars, and the player.
         live.placed.clear();
-        live.movers.place(&live.game, eye, &mat::planes(&vp), set.show.reach.mid.clamp(250.0, 450.0), self.dt, live.game.traffic_on && set.models, &mut live.placed);
+        let planes = mat::planes(&vp);
+        live.movers.place(&live.game, eye, &planes, set.show.reach.mid.clamp(250.0, 450.0), self.dt, live.game.traffic_on && set.models, &mut live.placed);
         if !set.models {
             live.placed.clear();
+        }
+        // The trees nearest the eye, at the reference's finer levels.
+        if set.models && set.show.instances && set.show.trees > 0.0 {
+            live.city.place_trees(gpu, &mut live.trees, eye, &planes, &TREES, &mut live.placed);
+        } else {
+            live.city.no_trees();
         }
         // The sun's map around the eye (not under the moon: its light casts little); what the street hides.
         let sun_drawn = set.sun && preset.night < 0.5;

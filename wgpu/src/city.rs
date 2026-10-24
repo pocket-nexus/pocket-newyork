@@ -17,9 +17,10 @@ use ny_frame::light::{Frame, Haze, AROUND, LIGHT_SCALE, SHADOW_OUT, SHADOW_SOFT,
 use ny_frame::mat::{self, Mat4};
 use ny_frame::near::Slots;
 use ny_frame::sun::SunView;
+use ny_frame::trees::{Reach as TreeReach, Trees};
 use ny_pack::{self as pack, kind, Batch, Block, Cell, City, Heights, Instance, Model, NearCell, Region, TexEntry, NO_TEX};
 use ny_sim::math::V3;
-use ny_view::{Item, Reach, Tables, RESIDENT};
+use ny_view::{Item, Planes, Reach, Tables, RESIDENT};
 use pocket_web_wgpu::gpu::Gpu;
 use pocket_web_wgpu::task;
 use pocket_web_wgpu::wgpu::{self, util::DeviceExt, BindGroup, Buffer, RenderPipeline, Texture, TextureFormat, TextureView};
@@ -37,8 +38,8 @@ pub const SUN_SIDE: u32 = 2048;
 const NEAR_SLOTS: usize = 128;
 /// Frames a slot stays untouched after its last draw before another record may go into it.
 const HELD: u32 = 3;
-/// Instances of models a frame may draw (every car of the traffic, and the player).
-pub const MODEL_INSTANCES: usize = 1024;
+/// Instances of models a frame may draw (every car of the traffic, the player, the trees drawn finer).
+pub const MODEL_INSTANCES: usize = 2048;
 /// Draws a frame may make, and the bytes between two draws' uniforms (WebGPU's offset alignment).
 const DRAWS: usize = 8192;
 const DRAW_STRIDE: u64 = 256;
@@ -83,7 +84,7 @@ pub struct FrameU {
     pub lamp_map: [f32; 4],
 }
 
-/// A draw's uniforms (`Draw` in scene.wgsl), 128 bytes.
+/// A draw's uniforms (`Draw` in scene.wgsl), 144 bytes.
 #[repr(C)]
 #[derive(Clone, Copy, Default, bytemuck::Pod, bytemuck::Zeroable)]
 struct DrawU {
@@ -95,6 +96,7 @@ struct DrawU {
     bake0: [f32; 4],
     bake1: [f32; 4],
     src: [u32; 4],
+    cut: [f32; 4],
 }
 
 /// The buffers a vertex or an instance is read from (`word` in scene.wgsl).
@@ -183,6 +185,9 @@ pub struct CityGpu {
     near_cells: Vec<NearCell>,
     texs: Vec<TexEntry>,
     pub models: Vec<Model>,
+    /// The first of the trees' models (`tree:`, past every other), and this frame's cut (`place_trees`).
+    first_tree: usize,
+    cut: [f32; 4],
     _resident: Buffer,
     bases: Bases,
     indices: Buffer,
@@ -192,6 +197,8 @@ pub struct CityGpu {
     near_offset: u64,
     /// Records read and not yet in the arena: the cell, its slot, and its bytes.
     arrived: Rc<RefCell<Vec<(u32, usize, Result<Vec<u8>, String>)>>>,
+    /// The instances of the record in each slot, for the trees placed nearer (`place_trees`).
+    instances: Vec<Vec<u8>>,
     pack: Pack,
     ring: Buffer,
     pictures: Vec<Option<TextureView>>,
@@ -545,6 +552,8 @@ impl CityGpu {
             spans,
             near_cells,
             texs,
+            first_tree: models.iter().position(|m| m.name().starts_with("tree:")).unwrap_or(models.len()),
+            cut: [0.0, 0.0, 0.0, -1.0],
             models,
             _resident: resident,
             bases,
@@ -554,6 +563,7 @@ impl CityGpu {
             slots: Slots::new(NEAR_SLOTS, HELD),
             near_offset: near_offset as u64,
             arrived: Rc::new(RefCell::new(Vec::new())),
+            instances: vec![Vec::new(); NEAR_SLOTS],
             pack: pack.clone(),
             ring,
             pictures,
@@ -580,6 +590,26 @@ impl CityGpu {
             geometry_bytes,
             texture_bytes,
         })
+    }
+
+    /// The trees' finer levels among the pack's models.
+    pub fn trees(&self) -> Trees {
+        Trees::new(&self.models, &self.batches)
+    }
+
+    /// Places the trees nearest the eye at their finer levels (`ny_frame::trees`) onto `placed`, from the cells'
+    /// records that are in; the cells' crowns of those trees are not drawn this frame.
+    pub fn place_trees(&mut self, gpu: &Gpu, trees: &mut Trees, eye: V3, planes: &Planes, reach: &TreeReach, placed: &mut Vec<(usize, Instance)>) {
+        self.receive(gpu);
+        let (slots, instances) = (&self.slots, &self.instances);
+        let record = |cell: u32| slots.ready(cell).map(|slot| instances[slot].as_slice());
+        let cut = trees.place(eye, planes, reach, &self.city, &self.cells, &self.batches, record, placed);
+        self.cut = [eye.x, eye.y, eye.z, if cut > 0.0 { cut * cut } else { -1.0 }];
+    }
+
+    /// No tree drawn finer this frame: the cells draw every crown.
+    pub fn no_trees(&mut self) {
+        self.cut[3] = -1.0;
     }
 
     /// The model named `name`.
@@ -609,6 +639,11 @@ impl CityGpu {
         for (cell, slot, bytes) in arrived {
             match bytes {
                 Ok(mut bytes) => {
+                    let c = &self.near_cells[cell as usize];
+                    let at = c.starts()[4];
+                    let kept = &mut self.instances[slot];
+                    kept.clear();
+                    kept.extend_from_slice(bytes.get(at..at + c.parts[4] as usize).unwrap_or(&[]));
                     bytes.resize(up(bytes.len() as u64, 4) as usize, 0);
                     gpu.queue.write_buffer(&self.arena, slot as u64 * self.slot_bytes, &bytes);
                     self.slots.arrived(cell, slot, true);
@@ -741,6 +776,7 @@ impl CityGpu {
             if matches!(b.kind, kind::OPEN | kind::OPEN_INST) {
                 u.gloss[2] = 1.0;
             }
+            u.cut = if b.kind == kind::LEAF_INST { self.cut } else { [0.0, 0.0, 0.0, -1.0] };
             if b.kind == kind::WALL {
                 // The night page holds its emission over its scale; with no night page, nothing glows.
                 let scale = self.texs.get(night_tex as usize).map(|e| e.metres).unwrap_or(0.0);
@@ -778,8 +814,10 @@ impl CityGpu {
         }
         self.items = items;
 
-        // What moves: one group per model, its instances in this frame's ring.
-        placed.sort_by_key(|p| p.0);
+        // What moves, and the trees drawn finer: one group per model, its instances in this frame's ring (the trees
+        // first: a list too long loses what moves, not a tree whose crown the cells no longer draw).
+        let first_tree = self.first_tree;
+        placed.sort_by_key(|p| (p.0 < first_tree, p.0));
         placed.truncate(MODEL_INSTANCES);
         let mut ring = Vec::with_capacity(placed.len() * 52);
         let mut groups = Vec::new();
@@ -809,15 +847,18 @@ impl CityGpu {
                         continue;
                     }
                     let boxed = b.kind == kind::BOXED_INST && !seen_through;
+                    let leaf = b.kind == kind::LEAF_INST;
                     let program = match (seen_through, boxed, b.kind == kind::OPEN_INST) {
+                        _ if leaf => Program::Leaf,
                         (true, _, _) => Program::Veil,
                         (_, true, _) => Program::Boxed,
                         (_, _, true) => Program::InstOpen,
                         _ => Program::Inst,
                     };
                     let night_tex = self.texs.get(b.tex as usize).map(|e| e.night).unwrap_or(NO_TEX);
-                    let pictures = if boxed { self.pictures(gpu, b.tex, night_tex) } else { (NO_TEX, NO_TEX) };
-                    let mut u = DrawU { origin: [b.origin[0], b.origin[1], b.origin[2], look.haze.density_to(g.at.y)], span: [b.span[0], b.span[1], b.span[2], 0.0], src: [RESIDENT_BUFFER, self.bases.solids, RING_BUFFER, g.first * 13], ..Default::default() };
+                    let pictures = if boxed { self.pictures(gpu, b.tex, night_tex) } else if leaf { self.pictures(gpu, b.tex, b.tex) } else { (NO_TEX, NO_TEX) };
+                    let shapes = if leaf { self.bases.walls } else { self.bases.solids };
+                    let mut u = DrawU { origin: [b.origin[0], b.origin[1], b.origin[2], look.haze.density_to(g.at.y)], span: [b.span[0], b.span[1], b.span[2], 0.0], src: [RESIDENT_BUFFER, shapes, RING_BUFFER, g.first * 13], cut: [0.0, 0.0, 0.0, -1.0], ..Default::default() };
                     if boxed {
                         // A car's pictures, and what it emits by night over its glow picture's scale.
                         u.span[3] = self.texs.get(night_tex as usize).map(|e| e.metres).unwrap_or(0.0) * look.frame[7];
@@ -882,7 +923,8 @@ impl CityGpu {
                             k if kind::instanced(k) => (Program::SunInst, (NO_TEX, NO_TEX)),
                             _ => (Program::SunSolid, (NO_TEX, NO_TEX)),
                         };
-                        let u = DrawU { origin: [b.origin[0], b.origin[1], b.origin[2], 0.0], span: [b.span[0], b.span[1], b.span[2], 0.0], src, ..Default::default() };
+                        let cut = if b.kind == kind::LEAF_INST { self.cut } else { [0.0, 0.0, 0.0, -1.0] };
+                        let u = DrawU { origin: [b.origin[0], b.origin[1], b.origin[2], 0.0], span: [b.span[0], b.span[1], b.span[2], 0.0], src, cut, ..Default::default() };
                         let Some(slot) = self.uniforms(u) else { return tris };
                         let (range, instances) = if kind::instanced(b.kind) { (b.idx_first..b.idx_first + b.idx_count, b.inst_first..b.inst_first + b.inst_count) } else { (b.idx_first..b.idx_first + b.idx_count, 0..1) };
                         tris += b.idx_count / 3 * (instances.end - instances.start);
@@ -891,7 +933,7 @@ impl CityGpu {
                 }
             }
         }
-        // What moves.
+        // What moves, and the trees drawn finer.
         for g in groups.iter().filter(|g| !g.faded) {
             let model = self.models[g.model];
             for bi in model.first..model.first + model.count {
@@ -899,9 +941,11 @@ impl CityGpu {
                 if b.veil != 0 {
                     continue;
                 }
-                let u = DrawU { origin: [b.origin[0], b.origin[1], b.origin[2], 0.0], span: [b.span[0], b.span[1], b.span[2], 0.0], src: [RESIDENT_BUFFER, self.bases.solids, RING_BUFFER, g.first * 13], ..Default::default() };
+                let leaf = b.kind == kind::LEAF_INST;
+                let (program, pictures, shapes) = if leaf { (Program::SunLeaf, self.pictures(gpu, b.tex, b.tex), self.bases.walls) } else { (Program::SunInst, (NO_TEX, NO_TEX), self.bases.solids) };
+                let u = DrawU { origin: [b.origin[0], b.origin[1], b.origin[2], 0.0], span: [b.span[0], b.span[1], b.span[2], 0.0], src: [RESIDENT_BUFFER, shapes, RING_BUFFER, g.first * 13], cut: [0.0, 0.0, 0.0, -1.0], ..Default::default() };
                 let Some(slot) = self.uniforms(u) else { return tris };
-                self.sun_commands.push(Command { program: Program::SunInst, pictures: (NO_TEX, NO_TEX), indices: Indices::Own, range: b.idx_first..b.idx_first + b.idx_count, base: b.vtx_first as i32, instances: 0..g.count, uniforms: slot });
+                self.sun_commands.push(Command { program, pictures, indices: Indices::Own, range: b.idx_first..b.idx_first + b.idx_count, base: b.vtx_first as i32, instances: 0..g.count, uniforms: slot });
                 tris += b.idx_count / 3 * g.count;
             }
         }

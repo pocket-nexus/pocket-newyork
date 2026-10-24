@@ -2,7 +2,7 @@
 
 Manhattan on a PS Vita: on foot, in a yellow taxi, on a bicycle or in a sightseeing helicopter, from the Battery to 125th Street, at four hours of the day, with the traffic on its streets. The city is [Slop New York](https://github.com/mrdoob/slop-newyork) by mrdoob, a three.js simulation of New York built from NYC Open Data and OpenStreetMap; this repository compiles what it draws for a handheld and draws it there.
 
-**Status: in progress.** It runs on a PS Vita in Pocket Devkit at 30 frames a second, at street level and over the title's aerial camera; [Where it stands](#where-it-stands) lists what is left. No package has been released. Compiled city data keeps the terms of its sources ([Attribution](#attribution)).
+**Status: in progress.** It runs on a PS Vita in Pocket Devkit at 30 frames a second, at street level and over the title's aerial camera; [Where it stands](#where-it-stands) lists what is left. The PS Vita package (0.1.0) and the browser build are on Pocket Studio as `newyork`. Compiled city data keeps the terms of its sources ([Attribution](#attribution)).
 
 The city is modelled once, as the reference's three.js scene that runs in a browser, and a compiler lowers it to what a console draws:
 
@@ -10,7 +10,7 @@ The city is modelled once, as the reference's three.js scene that runs in a brow
 - **`crates/ny-cook`** is the scene compiler: SceneIR in, one pack out, for a device profile (`profiles/vita60.json`).
 - **`crates/ny-pack`** is the pack: tables, vertex layouts and sections shared by the compiler and the runtimes.
 - **`crates/ny-view`** is what a frame draws: the places of the pack at the level of detail their distance asks for.
-- **`crates/ny-frame`** is what a frame works out on the processor before it draws, the same on every device: the hour's light, what moves as instances, what the street hides, which cells' records to read, the shadow window and the sun's map.
+- **`crates/ny-frame`** is what a frame works out on the processor before it draws, the same on every device: the hour's light, what moves as instances, the trees nearest the eye at finer levels, what the street hides, which cells' records to read, the shadow window and the sun's map.
 - **`crates/ny-sim`** is what moves, the same on every device: the reference's four ways through the city, its cameras, its street names, its signals, its traffic, its pedestrians and its highway's cars, compared against the reference itself.
 - **`ui/`** is the interface: one PocketJS app drawn over the city. **`crates/ny-interface`** is the renderer's side of it and the flow around play (the title, play, the menu).
 - **`vita/`** draws a pack on the PS Vita through GXM.
@@ -60,6 +60,7 @@ The reference imports three.js from its dev branch on a CDN; `THREE_COMMIT` in `
 - **Facade boxes at the far level** are prisms, as Pocket Tokyo draws its simple levels: every box's footprint goes into one grid of 4 m cells, cells within 10 m of height form a terrace, and a terrace's outline, straightened, becomes its walls (only where it looks out over lower ground) and a flat top. 138 000 triangles for all of Manhattan, low-rise included, where a painted box per tall building took 346 000.
 - **Facade boxes** become their walls, laid out as the reference's `facadeCell` lays them: a row for a partial storey at the bottom, the ground storey under its shop, entrance or rear page, the whole storeys above under the upper page, a solid band for a storey cut short at the top, and on masonry, columns for the corner piers. A wall quad is tested against the grid of heights 1.5 m out from its face: one its neighbours cover all along is left out, and at the mid and far levels one a lower neighbour covers in part starts at the neighbour's roof. That leaves out 40 % of the wall triangles.
 - **Repeated things** (lamp posts, signals, cornices, water towers, awnings, the bridges' members, the trees) are one shape each and an instance table: a matrix and a tint. Instance colours (awnings) are the tint itself; any other per-instance difference rides as the instance's mean probed colour against the first's.
+- **Trees** are the reference's: three species, each in two forms, at three levels. The cells hold every tree as its species' crown of 18 whole-crown cards (the reference's level 2, some 50 triangles); its levels 1 (cards along the branches, some 360) and 0 (a card on every twig, some 1 500) are models of the pack (`tree:<species>:<form>:<level>`), placed nearer the eye by the frame. A tree's instance carries its form in its tint's alpha: the reference picks the form from the site's coordinates, which the matrices round, so it is read from the reference's level 1, which holds every tree under its form.
 - **The levels of detail.** A cell is 128 m and holds the near level; its small repeated things (radius under 2.5 m) are its detail level. A block is 4 × 4 cells and holds the mid level; a region is 4 × 4 blocks and holds the far level. Island-wide meshes (the streets, the parks, the water) are cut by triangle. Each level simplifies what it holds (meshoptimizer, welded first), and what is merged clutter goes by a grid past the near level.
 - **Order is the culling structure.** A mid batch has its triangles (an instanced one, its instances) ordered by the cell of its block, a far batch by the block of its region, with a record of where each starts (`SPAN`): a frame draws, of a block the eye is near, the runs of the cells it does not draw near.
 - **Cells' records.** A cell's near and detail levels are one record of `NEAR`, read from the memory card when the eye comes near: 204 MB in all, 0.47 MB at most. The pack's own streams (the shapes, the mid and far levels) stay in memory.
@@ -74,6 +75,7 @@ The reference imports three.js from its dev branch on a CDN; `THREE_COMMIT` in `
 - **The programs** light in linear light with the hour's read-back light and end with its tone curve, then lay the haze over: the reference's aerial fog, its colour by the draw's direction and its density by the draw's height. Surfaces reflect the sky by their roughness and metalness (Schlick's Fresnel as roughness damps it), and the city's dim light where a reflection meets buildings across the street. Walls read their facade page and, by night, the page of what their rooms emit. Ground reads its picture over world x and z. Geometry coloured by vertex takes its probed colour, and its emission by night. Instanced shapes take their instance's matrix and tint from a second stream; trees cut their cards where the leaves' picture is under half. The sky is a dome under the hour's panorama.
 - **Shadows near the eye.** Besides the height grid's sweep, a 1 024² depth map of a 320 m square the sun looks down on is drawn before each frame from the near cells and what moves (trees, lamp posts, awnings, cars and people cast shadows, buildings' have edges); every program takes the darker of the two.
 - **What the street hides is not drawn.** A horizon around the eye, from the height grid's 8 m cells at their lowest within 256 m, leaves out the mid and far blocks (and near cells) nothing of which rises over it: from street level most of the city behind the avenue's walls.
+- **Trees near the eye** are drawn at the reference's finer levels (`ny_frame::trees`): level 0 for the nearest ten within 35 m, level 1 for the rest of the nearest 200 within 200 m (the reference: level 0 within 105 m, level 1 within 420 m). The frame finds them in the cells' records around the eye and places them as models; the programs fold away the cells' crowns of trees within the distance the frame found, in the view and in the sun's map, where the finer levels cast their own dappled shadows. A card is lit as the reference lights it: by its crown's normal on both faces, and with the sun shining through it towards the eye (`FoliageLightingModel`); past the sun's map, where the crowns do not shadow themselves, the sun reaches little of a crown's inner leaves.
 - **Night.** The lamps' pools are the reference's cobra-head spotlights (88 cd, 0.96 rad, 25 m); everything lit takes them, and the light they leave around (the pools over ~80 m); wet ground mirrors them by Fresnel, wetness and smoothness. The reference's bloom runs at every hour, and the sun has its disc.
 - **What moves** is drawn from the game each frame: the traffic's cars (the reference's full cars within 40 m, its stand-ins past that) under pictures of themselves seen along each axis, those in view to 450 m; the sidewalks' people (the nearest 24 within 70 m, the near figure within 15 m) at their heights and in their coats; the highway's cars; and the player's vehicle. The helicopter's rotors turn at the reference's 24 and 32 radians a second: at 30 frames a second the main rotor turns 46° a frame, half the way to the next blade, so each rotor is drawn eight times through the angle it swept since the frame before, the leading copy whole and the rest fading behind it. The traffic, the people and the highway step on a thread of their own alongside the frame.
 - **The interface** is the PocketJS guest of `ui/`, drawn over the city.
@@ -89,6 +91,8 @@ PS Vita, Pocket Devkit over USB, 30 frames a second, 2× multisampling, `bun too
 | Title's aerial camera, 30 s | 900 frames, 5 late; a mean of 176 000 triangles |
 | GPU at the street, by part (reaches at the governor's floor) | trees 5.5 ms, what moves 5.1, bloom 1.8, the sun's map 1.5 |
 | CPU | the world's step off the frame (0.1 ms waited for it); the horizon 4.8 ms |
+| Street level with the trees nearer at their finer levels, 30 s (2026-10-24) | 880 frames, 29 late (900, 2 late, without them) |
+| Central Park, the reference's Central Park Oasis camera, at the golden hour, 30 s (2026-10-24) | 590 frames (610 with the cells' crowns alone); the GPU takes about 50 ms a frame here, 21 ms without any tree |
 | First launch | about 75 s, most of it copying the 377 MB pack to the memory card |
 
 ## In a browser tab
@@ -103,6 +107,7 @@ It runs at sixty frames a second at the PS Vita's full reaches with no governor,
 | | |
 | --- | --- |
 | The title, and each way through the city by day and by night, 5 s each | 59.95 to 59.96 frames a second, 0 late; 1 500 to 1 900 draws |
+| Central Park at the golden hour and at midday, the trees at the reference's levels to 420 m (`bun tools/wgpu.ts build`, 2026-10-24), 8 s each | 60.0 frames a second, 0 late; 790 000 triangles of instances |
 | A frame's cost without the display, over 300 frames | 0.49 ms |
 | From the page's start: the interface up, the city in (the title card plays until 2.4 s) | 0.11 s, 2.47 s; 139 MB of the pack read by then |
 | The deployable directory | 243 files, 384 MB (the pack in 205 pieces) |
@@ -112,7 +117,7 @@ It runs at sixty frames a second at the PS Vita's full reaches with no governor,
 Beside the reference from the same eye (`bun tools/newyork.ts look --eye x,y,z --at x,y,z`), what is left:
 
 - **Roofs** past the near level are flat and bluish: the reference draws rooftop plant (water towers, bulkheads, chillers) within 560 m, and here only the near level carries it.
-- **Leaves** past the sun's map have no shadow, and near crowns cost the most of a street frame (their cards are cut, so the GPU shades every layer).
+- **Leaves** cost the most of a frame: their cards are cut, so the GPU shades every layer. In Central Park a frame takes about 50 ms of the GPU, some 20 frames a second.
 - **Not drawn yet:** the steam, the headlights' beams, the highway's lamp flares, the soft shadow under a car.
 - **Not done:** the Pocket3D Demo row.
 

@@ -1,6 +1,6 @@
 // The sun's depth map: what a shape is, seen from the sun (uSunVp: from world to the map's x, y and depth). A
 // shape's own points (a cell's walls, solids, signs), or INSTANCED at the instances of a second stream; LEAF: a
-// tree's cards, their texture coordinates for the cut.
+// tree's cards, their texture coordinates for the picture's cut, and no tree within uCut.
 
 void main(
     float3 aPosition,
@@ -15,6 +15,9 @@ void main(
 #endif
     uniform float4x4 uSunVp,
     uniform float4 uBox[2],
+#ifdef LEAF
+    uniform float4 uCut,
+#endif
     out float4 oPosition : POSITION
 #ifdef LEAF
     , out float3 oUv : TEXCOORD0
@@ -28,5 +31,9 @@ void main(
     oPosition = mul(uSunVp, p);
 #ifdef LEAF
     oUv = float3(aUv * UV_RANGE, aBark.a);
+    // (a tree the frame draws finer casts its finer level's shadow: see leaf_v.cg)
+    float3 mid = float3(aRow0.w, aRow1.w + 6.0 * aRow1.y, aRow2.w) - uCut.xyz;
+    if (dot(mid, mid) < uCut.w)
+        oPosition = float4(4.0, 4.0, 0.5, 1.0);
 #endif
 }

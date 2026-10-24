@@ -354,6 +354,8 @@ fn main() {
     let mut means: HashMap<(usize, usize, usize), [f32; 3]> = HashMap::new();
     let mut inst_colors: HashMap<usize, Vec<f32>> = HashMap::new();
     let mut tree_shapes: HashMap<usize, u32> = HashMap::new();
+    let forms = tree_forms(&ir, &mut mats);
+    let mut formless = 0;
     let mut picture_shapes: HashMap<usize, u32> = HashMap::new();
     let mut lamps: Vec<([f32; 3], [f32; 3])> = Vec::new();
     let mut sky_boxes: Vec<skyline::Box> = Vec::new();
@@ -404,7 +406,10 @@ fn main() {
         }
         if class == Class::Tree {
             if let Some(tex) = leaves {
-                tree_instance(&ir, o, *i, m, b, src, probe, tex, &mut bins, &mut tree_shapes, &mut attrs_cache);
+                let form = forms.get(&[m[12], m[13], m[14]].map(f32::to_bits)).copied();
+                formless += form.is_none() as usize;
+                let form = form.unwrap_or(0);
+                tree_instance(&ir, o, *i, m, b, src, probe, tex, form, &mut bins, &mut tree_shapes, &mut attrs_cache);
             }
             continue;
         }
@@ -566,6 +571,8 @@ fn main() {
         *spend.entry((2, "skyline".into())).or_default() += tops + walls;
     }
     let model_parts = models::shapes(&ir_dir, &mut bins, &mut textures).unwrap_or_else(|e| panic!("{e}"));
+    eprintln!("trees: {} by their form, {formless} without one", forms.len());
+    let trees = leaves.map(|tex| tree_levels(&ir, &profile, tex, &mut bins, &tree_shapes)).unwrap_or_default();
     let tris = bins.triangles();
     eprintln!("triangles: near {} mid {} far {} detail {}", tris[0], tris[1], tris[2], tris[3]);
     let mut spent: Vec<_> = spend.into_iter().collect();
@@ -577,7 +584,8 @@ fn main() {
     }
 
     let mut w = bins::Written::from_bins(&bins);
-    let model_table = models::table(&model_parts, &mut w);
+    let mut model_table = models::table(&model_parts, &mut w);
+    models::trees(&trees, leaves.unwrap_or(pack::NO_TEX), &mut w, &mut model_table);
     let mut pw = pack::Writer::default();
     let meta = serde_json::json!({
         "name": "Pocket New York",
@@ -884,37 +892,11 @@ fn leaves_picture(ir: &std::path::Path, textures: &mut tex::Textures) -> Option<
     Some(textures.add_png(&ir.join(file), 0.0).unwrap_or_else(|e| panic!("{e}")))
 }
 
-/// One tree: an instance of its species' crown in its cell's near level, tinted as the tree is (`aTreeData`).
+/// One tree: an instance of its species' crown in its cell's near level, tinted as the tree is (`aTreeData`), its
+/// tint's alpha 255 less its form (`pack::kind::LEAF_INST`).
 #[allow(clippy::too_many_arguments)]
-fn tree_instance(ir: &Ir, o: &Object, i: usize, m: &M4, b: &Aabb, src: &Source, probe: Option<&ir::Probe>, leaves: u32, bins: &mut Bins, shapes: &mut HashMap<usize, u32>, cache: &mut HashMap<(usize, String), Vec<f32>>) {
-    let g = &ir.geometries[o.geometry];
-    let shape = *shapes.entry(o.id).or_insert_with(|| {
-        let uv = ir.attribute(g, "uv");
-        let tree = ir.attribute(g, "aTree");
-        // The cards as the reference made them: simplifying would tear them from their pictures.
-        let tris = ir.triangles(g);
-        let mut verts = Vec::with_capacity(src.pos.len());
-        for vi in 0..src.pos.len() {
-            let (u, v) = uv.as_ref().map(|(a, s)| (a[vi * s], a[vi * s + 1])).unwrap_or((0.0, 0.0));
-            let (leaf, crown) = tree.as_ref().map(|(a, s)| (a[vi * s], a[vi * s + 1])).unwrap_or((1.0, 1.0));
-            let is_leaf = leaf > 0.5;
-            // The bark's colour is the probe's; a card's comes from the leaves' picture.
-            let bark = probe.map(|p| p.albedo(0, vi)).unwrap_or([90, 75, 60, 255]);
-            let ao = if is_leaf { crown * 0.45 + 0.55 } else { crown * 0.4 + 0.6 };
-            verts.push(Vx {
-                p: src.pos[vi],
-                n: geom::normalize(src.nrm[vi]).map(geom::snorm8),
-                ao: (ao.clamp(0.0, 1.0) * 255.0) as u8,
-                a: if is_leaf { [255, 255, 255, 255] } else { [bark[0], bark[1], bark[2], 0] },
-                b: [0; 4],
-                // (the picture's rows run from v = 1 down)
-                uv: [u, 1.0 - v],
-                gloss: bins::MATTE,
-            });
-        }
-        let idx: Vec<u32> = tris.iter().flat_map(|(_, t)| t.iter().copied()).collect();
-        bins.shape_of(pack::kind::WALL, leaves, &verts, &idx)
-    });
+fn tree_instance(ir: &Ir, o: &Object, i: usize, m: &M4, b: &Aabb, src: &Source, probe: Option<&ir::Probe>, leaves: u32, form: u8, bins: &mut Bins, shapes: &mut HashMap<usize, u32>, cache: &mut HashMap<(usize, String), Vec<f32>>) {
+    let shape = *shapes.entry(o.id).or_insert_with(|| tree_shape(ir, o, src, probe, leaves, bins));
     let inst = o.instances.as_ref().unwrap();
     let data = cache.entry((o.id, "aTreeData".into())).or_insert_with(|| {
         let a = &inst.attrs["aTreeData"];
@@ -923,7 +905,84 @@ fn tree_instance(ir: &Ir, o: &Object, i: usize, m: &M4, b: &Aabb, src: &Source, 
     let tint = [0, 1, 2].map(|k| (geom::srgb(data[i * 4 + k]) as f32 / 255.0 * 128.0).round().clamp(0.0, 255.0) as u8);
     let rows = [[m[0], m[4], m[8], m[12]], [m[1], m[5], m[9], m[13]], [m[2], m[6], m[10], m[14]]];
     let place = bins.place(NEAR, b.center());
-    bins.instance(NEAR, place, pack::kind::LEAF_INST, shape, pack::Instance { rows, tint: [tint[0], tint[1], tint[2], 255] }, b);
+    bins.instance(NEAR, place, pack::kind::LEAF_INST, shape, pack::Instance { rows, tint: [tint[0], tint[1], tint[2], 255 - form] }, b);
+}
+
+/// A level of a tree as one shape: its bark and its cards, under the leaves' picture.
+fn tree_shape(ir: &Ir, o: &Object, src: &Source, probe: Option<&ir::Probe>, leaves: u32, bins: &mut Bins) -> u32 {
+    let g = &ir.geometries[o.geometry];
+    let uv = ir.attribute(g, "uv");
+    let tree = ir.attribute(g, "aTree");
+    // The cards as the reference made them: simplifying would tear them from their pictures.
+    let tris = ir.triangles(g);
+    let mut verts = Vec::with_capacity(src.pos.len());
+    for vi in 0..src.pos.len() {
+        let (u, v) = uv.as_ref().map(|(a, s)| (a[vi * s], a[vi * s + 1])).unwrap_or((0.0, 0.0));
+        let (leaf, crown) = tree.as_ref().map(|(a, s)| (a[vi * s], a[vi * s + 1])).unwrap_or((1.0, 1.0));
+        let is_leaf = leaf > 0.5;
+        // The bark's colour is the probe's; a card's comes from the leaves' picture.
+        let bark = probe.map(|p| p.albedo(0, vi)).unwrap_or([90, 75, 60, 255]);
+        let ao = if is_leaf { crown * 0.45 + 0.55 } else { crown * 0.4 + 0.6 };
+        verts.push(Vx {
+            p: src.pos[vi],
+            n: geom::normalize(src.nrm[vi]).map(geom::snorm8),
+            ao: (ao.clamp(0.0, 1.0) * 255.0) as u8,
+            a: if is_leaf { [255, 255, 255, 255] } else { [bark[0], bark[1], bark[2], 0] },
+            b: [0; 4],
+            // (the picture's rows run from v = 1 down)
+            uv: [u, 1.0 - v],
+            gloss: bins::MATTE,
+        });
+    }
+    let idx: Vec<u32> = tris.iter().flat_map(|(_, t)| t.iter().copied()).collect();
+    bins.shape_of(pack::kind::WALL, leaves, &verts, &idx)
+}
+
+/// `Trees_<species>_v<form>_lod<level>` → (species, form, level).
+fn tree_level_of(name: &str) -> Option<(&str, u8, u8)> {
+    let rest = name.strip_prefix("Trees_")?;
+    let (rest, level) = rest.rsplit_once("_lod")?;
+    let (species, form) = rest.rsplit_once("_v")?;
+    Some((species, form.parse().ok()?, level.parse().ok()?))
+}
+
+/// Which of its two forms each tree takes, by where it stands (the bits of its matrix's translation): the
+/// reference picks it from the site's own coordinates (`hashPos` in `trees.js`), which the matrices round, and its
+/// level 1 holds every tree under its form.
+fn tree_forms(ir: &Ir, mats: &mut HashMap<usize, Vec<f32>>) -> HashMap<[u32; 3], u8> {
+    let mut out = HashMap::new();
+    for o in &ir.objects {
+        let Some((_, form, 1)) = tree_level_of(&o.name) else { continue };
+        for i in 0..o.instance_count() {
+            let m = instance_matrix(ir, o, i, mats);
+            out.insert([m[12], m[13], m[14]].map(f32::to_bits), form);
+        }
+    }
+    out
+}
+
+/// The trees' levels as models a device places at the trees nearest the eye (`ny_frame::trees`): each species'
+/// crown the cells hold (`tree:<species>`) and its two forms' levels 0 and 1 (`tree:<species>:<form>:<level>`).
+fn tree_levels(ir: &Ir, profile: &Profile, leaves: u32, bins: &mut Bins, far: &HashMap<usize, u32>) -> Vec<(String, u32)> {
+    let mut out = Vec::new();
+    for o in &ir.objects {
+        if let Some(species) = o.name.strip_prefix("Trees_").and_then(|n| n.strip_suffix("_lod2")) {
+            if let Some(&shape) = far.get(&o.id) {
+                out.push((format!("tree:{species}"), shape));
+            }
+        }
+    }
+    for o in &ir.objects {
+        let Some((species, form, level @ (0 | 1))) = tree_level_of(&o.name) else { continue };
+        if !out.iter().any(|(n, _)| *n == format!("tree:{species}")) {
+            continue;
+        }
+        let src = source(ir, o.geometry, profile);
+        let shape = tree_shape(ir, o, &src, ir.probe(o.id).as_ref(), leaves, bins);
+        out.push((format!("tree:{species}:{form}:{level}"), shape));
+    }
+    eprintln!("trees: {} models of their levels", out.len());
+    out
 }
 
 /// What of a wall's quad no neighbour covers: false when the boxes beside it stand at least as high as its top all

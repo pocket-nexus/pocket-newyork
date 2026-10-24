@@ -11,13 +11,14 @@ use std::io::{Read, Seek, SeekFrom};
 use ny_pack::{self as pack, kind, Batch, Block, Cell, City, Instance, Model, NearCell, Region, TexEntry, NO_TEX};
 use pocket_vita_gxm::mem::Ring;
 use ny_sim::math::V3;
-use ny_view::{Item, Reach, Tables, RESIDENT};
+use ny_view::{Item, Planes, Reach, Tables, RESIDENT};
 use vita2d_sys as g;
 
 use crate::gpu::{self, Blend, Cull, Gpu, Param, Program, Stream, Uniforms};
 use crate::near::Near;
 use ny_frame::light::{AROUND, SHADOW_OUT, SHADOW_SOFT, SUN_BIAS};
 use ny_frame::mat::{self, Mat4};
+use ny_frame::trees::{Reach as TreeReach, Trees};
 use crate::sunmap::SunMap;
 
 const FRAME: &str = include_str!("../shaders/frame.cg");
@@ -127,6 +128,8 @@ struct Pass {
     gloss: Param,
     bake: Param,
     veil: Param,
+    /// The eye, and the square of the distance within which a tree's crown is drawn finer (`ny_frame::trees`).
+    cut: Param,
     units: [u32; 2],
     shadow: Option<u32>,
 }
@@ -134,7 +137,7 @@ struct Pass {
 impl Pass {
     unsafe fn new(prog: Program, pictures: [&str; 2]) -> Pass {
         let units = pictures.map(|name| if name.is_empty() { 0 } else { prog.fs.sampler_index(name).unwrap_or(0) });
-        Pass { mvp: prog.vs.param("uMvp"), tile: prog.vs.param("uTile"), lamp_map: prog.vs.param("uLampMap"), lamp: prog.fs.sampler_index("uLamp"), around: prog.fs.sampler_index("uAround"), sun_vp: prog.vs.param("uSunVp"), sun: prog.fs.sampler_index("uSun"), vp: prog.vs.param("uVp"), bx: prog.vs.param("uBox"), frame: prog.vs.param("uFrame"), look: prog.fs.param("uLook"), gloss: prog.vs.param("uGloss"), bake: prog.vs.param("uBake"), veil: prog.fs.param("uVeil"), units, shadow: prog.fs.sampler_index("uShadow"), prog }
+        Pass { mvp: prog.vs.param("uMvp"), tile: prog.vs.param("uTile"), lamp_map: prog.vs.param("uLampMap"), lamp: prog.fs.sampler_index("uLamp"), around: prog.fs.sampler_index("uAround"), sun_vp: prog.vs.param("uSunVp"), sun: prog.fs.sampler_index("uSun"), vp: prog.vs.param("uVp"), bx: prog.vs.param("uBox"), frame: prog.vs.param("uFrame"), look: prog.fs.param("uLook"), gloss: prog.vs.param("uGloss"), bake: prog.vs.param("uBake"), veil: prog.fs.param("uVeil"), cut: prog.vs.param("uCut"), units, shadow: prog.fs.sampler_index("uShadow"), prog }
     }
 
     /// Binds the program, the shadow window and the lamps' light (under them, and around).
@@ -236,6 +239,9 @@ pub struct CityGpu {
     pub models: Vec<Model>,
     /// This frame's instances of the models, in a ring of two frames.
     ring: Ring,
+    /// The first of the trees' models (`tree:`, past every other), and this frame's cut (`place_trees`).
+    first_tree: usize,
+    cut: [f32; 4],
     pub geometry_bytes: usize,
     pub texture_bytes: usize,
 }
@@ -273,6 +279,7 @@ impl CityGpu {
         let near_cells: Vec<NearCell> = pack::table(&p.read(pack::NCEL)?);
         let texs: Vec<TexEntry> = pack::table(&p.read(pack::TEXS)?);
         let models: Vec<Model> = pack::table(&p.read(pack::MODL)?);
+        let first_tree = models.iter().position(|m| m.name().starts_with("tree:")).unwrap_or(models.len());
 
         progress("Preparing programs");
         let defines = scene_defines(shadow_unit, extra);
@@ -443,6 +450,8 @@ impl CityGpu {
             wanted: Vec::with_capacity(256),
             models,
             ring: Ring::new(MODEL_INSTANCES * 52 + 4096, 2)?,
+            first_tree,
+            cut: [0.0, 0.0, 0.0, -1.0],
             texture_bytes,
         })
     }
@@ -558,6 +567,9 @@ impl CityGpu {
             let v = Uniforms::vertex(ctx);
             v.set(pass.lamp_map, &self.lamp_map);
             v.set(pass.sun_vp, &sun.read);
+            if b.kind == kind::LEAF_INST {
+                v.set(pass.cut, &self.cut);
+            }
             if matches!(b.kind, kind::WALL | kind::GROUND | kind::PICTURE | kind::PICTURE_INST) {
                 let g = self.texs.get(b.tex as usize).map(|e| e.gloss).unwrap_or([204, 0, 0, 0]);
                 v.set(pass.gloss, &[g[0] as f32 / 255.0, g[1] as f32 / 255.0, 0.0, 0.0]);
@@ -622,6 +634,36 @@ impl CityGpu {
 }
 
 impl CityGpu {
+    /// The trees' finer levels among the pack's models.
+    pub fn trees(&self) -> Trees {
+        Trees::new(&self.models, &self.batches)
+    }
+
+    /// Places the trees nearest the eye at their finer levels (`ny_frame::trees`) onto `placed`, from the cells'
+    /// records that are in; the cells' crowns of those trees are not drawn this frame.
+    pub fn place_trees(&mut self, trees: &mut Trees, eye: V3, planes: &Planes, reach: &TreeReach, placed: &mut Vec<(usize, Instance)>) {
+        self.near.receive();
+        let (near, near_cells) = (&self.near, &self.near_cells);
+        let record = |cell: u32| {
+            let base = near.ready(cell)?;
+            let c = &near_cells[cell as usize];
+            // SAFETY: a ready record stays in its slot for the frames that draw from it.
+            Some(unsafe { core::slice::from_raw_parts(base.add(c.starts()[4]), c.parts[4] as usize) })
+        };
+        let cut = trees.place(eye, planes, reach, &self.city, &self.cells, &self.batches, record, placed);
+        self.cut = [eye.x, eye.y, eye.z, if cut > 0.0 { cut * cut } else { -1.0 }];
+    }
+
+    /// No tree drawn finer this frame: the cells draw every crown.
+    pub fn no_trees(&mut self) {
+        self.cut[3] = -1.0;
+    }
+
+    /// The distance within which the cells' crowns are not drawn this frame.
+    pub fn cut_reach(&self) -> f32 {
+        if self.cut[3] > 0.0 { libm::sqrtf(self.cut[3]) } else { 0.0 }
+    }
+
     /// The model named `name`.
     pub fn model(&self, name: &str) -> Option<usize> {
         self.models.iter().position(|m| m.name() == name)
@@ -631,7 +673,9 @@ impl CityGpu {
     /// the ring: one group per model, its instances' buffer and count, and where its first stands.
     pub unsafe fn prepare_models(&mut self, placed: &mut Vec<(usize, Instance)>) -> Vec<ModelGroup> {
         self.ring.next_frame();
-        placed.sort_by_key(|p| p.0);
+        // (the trees first: a list too long loses what moves, not a tree whose crown the cells no longer draw)
+        let first_tree = self.first_tree;
+        placed.sort_by_key(|p| (p.0 < first_tree, p.0));
         placed.truncate(MODEL_INSTANCES);
         let mut out = Vec::new();
         let mut at = 0;
@@ -668,7 +712,9 @@ impl CityGpu {
                         continue;
                     }
                     let boxed = b.kind == kind::BOXED_INST && !seen_through;
+                    let leaf = b.kind == kind::LEAF_INST;
                     let pass = match (b.kind == kind::OPEN_INST, boxed, night) {
+                        _ if leaf => if night { &self.leaf_night } else { &self.leaf },
                         _ if seen_through => if night { &self.veil_night } else { &self.veil },
                         (_, true, true) => &self.boxed_night,
                         (_, true, false) => &self.boxed,
@@ -690,17 +736,23 @@ impl CityGpu {
                         }
                         glow = self.texs.get(night_tex as usize).map(|e| e.metres).unwrap_or(0.0) * frame[7];
                     }
+                    if leaf {
+                        if let Some(Some(t)) = self.textures.get(b.tex as usize) {
+                            g::sceGxmSetFragmentTexture(ctx, pass.units[0], &t.gxm);
+                        }
+                    }
                     if seen_through {
                         gpu::state_overlay(ctx, true);
                         g::sceGxmSetCullMode(ctx, g::SceGxmCullMode_SCE_GXM_CULL_NONE);
                     } else {
-                        gpu::state_opaque(ctx, if b.kind == kind::OPEN_INST { Cull::None } else { Cull::Cw });
+                        gpu::state_opaque(ctx, if b.kind == kind::OPEN_INST || leaf { Cull::None } else { Cull::Cw });
                     }
                     let v = Uniforms::vertex(ctx);
                     v.set(pass.vp, vp);
                     v.set(pass.lamp_map, &self.lamp_map);
                     v.set(pass.sun_vp, &sun.read);
                     v.set(pass.bx, &[b.origin[0], b.origin[1], b.origin[2], 0.0, b.span[0], b.span[1], b.span[2], 0.0]);
+                    v.set(pass.cut, &[0.0, 0.0, 0.0, -1.0]);
                     if boxed {
                         let (lo, size) = (model.box_min, model.box_size);
                         v.set(pass.bake, &[lo[0], lo[1], lo[2], 0.0, 1.0 / size[0].max(1e-3), 1.0 / size[1].max(1e-3), 1.0 / size[2].max(1e-3), 0.0]);
@@ -714,7 +766,7 @@ impl CityGpu {
                     let mut fr = *frame;
                     fr[3] = haze.density_to(group.at.y);
                     v.set(pass.frame, &fr);
-                    g::sceGxmSetVertexStream(ctx, 0, self.own.solids.add(b.vtx_first as usize * 20).cast());
+                    g::sceGxmSetVertexStream(ctx, 0, if leaf { self.own.walls } else { self.own.solids }.add(b.vtx_first as usize * 20).cast());
                     g::sceGxmSetVertexStream(ctx, 1, group.buf.cast());
                     g::sceGxmDrawInstanced(ctx, g::SceGxmPrimitiveType_SCE_GXM_PRIMITIVE_TRIANGLES, g::SceGxmIndexFormat_SCE_GXM_INDEX_FORMAT_U16, self.own.indices.add(b.idx_first as usize).cast(), b.idx_count * n, b.idx_count);
                     tris += b.idx_count / 3 * n;
@@ -771,6 +823,9 @@ impl CityGpu {
                         let v = Uniforms::vertex(ctx);
                         v.set(pass.sun_vp, &sun.draw);
                         v.set(pass.bx, &[b.origin[0], b.origin[1], b.origin[2], 0.0, b.span[0], b.span[1], b.span[2], 0.0]);
+                        if which == 2 {
+                            v.set(pass.cut, &self.cut);
+                        }
                         if which == 0 {
                             let vb = if matches!(b.kind, kind::WALL | kind::PICTURE) { walls } else { solids };
                             gpu::draw(ctx, vb.add(b.vtx_first as usize * 20), indices.add(b.idx_first as usize), b.idx_count);
@@ -786,9 +841,8 @@ impl CityGpu {
                 }
             }
         }
-        // What moves.
-        self.sun_inst.prog.bind(ctx, false);
-        gpu::state_opaque(ctx, Cull::None);
+        // What moves, and the trees drawn finer.
+        bound = None;
         for group in groups.iter().filter(|g| !g.faded) {
             let model = self.models[group.model];
             for bi in model.first..model.first + model.count {
@@ -796,10 +850,23 @@ impl CityGpu {
                 if b.veil != 0 {
                     continue;
                 }
+                let leaf = b.kind == kind::LEAF_INST;
+                let pass = if leaf { &self.sun_leaf } else { &self.sun_inst };
+                if bound.map(|x| x.0) != Some(leaf as u32) {
+                    pass.prog.bind(ctx, false);
+                    gpu::state_opaque(ctx, Cull::None);
+                    if leaf {
+                        if let Some(Some(t)) = self.textures.get(b.tex as usize) {
+                            g::sceGxmSetFragmentTexture(ctx, pass.units[0], &t.gxm);
+                        }
+                    }
+                    bound = Some((leaf as u32, b.tex));
+                }
                 let v = Uniforms::vertex(ctx);
-                v.set(self.sun_inst.sun_vp, &sun.draw);
-                v.set(self.sun_inst.bx, &[b.origin[0], b.origin[1], b.origin[2], 0.0, b.span[0], b.span[1], b.span[2], 0.0]);
-                g::sceGxmSetVertexStream(ctx, 0, self.own.solids.add(b.vtx_first as usize * 20).cast());
+                v.set(pass.sun_vp, &sun.draw);
+                v.set(pass.bx, &[b.origin[0], b.origin[1], b.origin[2], 0.0, b.span[0], b.span[1], b.span[2], 0.0]);
+                v.set(pass.cut, &[0.0, 0.0, 0.0, -1.0]);
+                g::sceGxmSetVertexStream(ctx, 0, if leaf { self.own.walls } else { self.own.solids }.add(b.vtx_first as usize * 20).cast());
                 g::sceGxmSetVertexStream(ctx, 1, group.buf.cast());
                 g::sceGxmDrawInstanced(ctx, g::SceGxmPrimitiveType_SCE_GXM_PRIMITIVE_TRIANGLES, g::SceGxmIndexFormat_SCE_GXM_INDEX_FORMAT_U16, self.own.indices.add(b.idx_first as usize).cast(), b.idx_count * group.count, b.idx_count);
                 tris += b.idx_count / 3 * group.count;

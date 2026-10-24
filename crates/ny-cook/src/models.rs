@@ -194,12 +194,27 @@ pub fn table(parts: &Parts, w: &mut Written) -> Vec<Model> {
             b.veil = if p.opacity < 0.99 { (p.opacity * 255.0).round().clamp(1.0, 254.0) as u32 } else { 0 };
             w.batches.push(b);
         }
-        let mut n = [0u8; 24];
-        for (i, c) in name.bytes().take(23).enumerate() {
-            n[i] = c;
-        }
         let (box_min, box_size) = boxed.unwrap_or(([0.0; 3], [0.0; 3]));
-        out.push(Model { name: n, first, count: list.len() as u32, box_min, box_size });
+        out.push(Model { name: name_of(name), first, count: list.len() as u32, box_min, box_size });
     }
     out
+}
+
+/// Appends the trees' levels (`tree_levels` in main.rs: names and shapes) to the table as models of one
+/// `kind::LEAF_INST` batch each, under the leaves' picture.
+pub fn trees(levels: &[(String, u32)], leaves: u32, w: &mut Written, table: &mut Vec<Model>) {
+    for (name, shape) in levels {
+        let mut b = w.shape_batches[*shape as usize];
+        b.kind = pack::kind::LEAF_INST;
+        b.tex = leaves;
+        table.push(Model { name: name_of(name), first: w.batches.len() as u32, count: 1, box_min: [0.0; 3], box_size: [0.0; 3] });
+        w.batches.push(b);
+    }
+}
+
+fn name_of(name: &str) -> [u8; 24] {
+    assert!(name.len() < 24, "a model's name is under 24 bytes: {name}");
+    let mut n = [0u8; 24];
+    n[..name.len()].copy_from_slice(name.as_bytes());
+    n
 }
