@@ -65,7 +65,7 @@ fn span(eye: V3, min: [f32; 2], max: [f32; 2]) -> (f32, f32, f32, f32) {
         far = far.max(dx * dx + dz * dz);
     }
     let k = BINS as f32 / 4.0;
-    let start = (mid + lo).rem_euclid(4.0) * k;
+    let start = crate::wrap(mid + lo, 4.0) * k;
     // (nearest: from the eye to the box along the ground)
     let nx = (min[0] - eye.x).max(0.0).max(eye.x - max[0]);
     let nz = (min[1] - eye.z).max(0.0).max(eye.z - max[1]);
@@ -83,8 +83,8 @@ impl Horizon {
         self.eye = eye;
         self.on = false;
         let Some(g) = coarse else { return };
-        let r = (REACH / g.step).ceil() as i32;
-        let (ci, cj) = (((eye.x - g.x0) / g.step).floor() as i32, ((eye.z - g.z0) / g.step).floor() as i32);
+        let r = libm::ceilf(REACH / g.step) as i32;
+        let (ci, cj) = (libm::floorf((eye.x - g.x0) / g.step) as i32, libm::floorf((eye.z - g.z0) / g.step) as i32);
         for j in (cj - r).max(0)..=(cj + r).min(g.side as i32 - 1) {
             for i in (ci - r).max(0)..=(ci + r).min(g.side as i32 - 1) {
                 let rise = g.low[j as usize * g.side + i as usize] - eye.y;

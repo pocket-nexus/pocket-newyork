@@ -11,17 +11,14 @@
 //! frame timings under `engine`.
 
 mod city;
-mod crowd;
 mod glow;
 mod gpu;
 mod hostfs;
 mod interface;
-mod mat;
 mod near;
 mod paths;
 mod shadow;
 mod sunmap;
-mod horizon;
 mod sky;
 
 use std::io::{Read, Write};
@@ -30,6 +27,9 @@ use std::time::{Duration, Instant};
 
 use city::{CityGpu, PackFile, Show};
 use gpu::Gpu;
+use ny_frame::light::{bloom, frame_light, sun_disc};
+use ny_frame::movers::Movers;
+use ny_frame::{horizon, mat};
 use ny_interface::{channel, pad, Mode, Pad, Session};
 use ny_pack::Preset;
 use ny_sim::math::{v3, V3};
@@ -345,9 +345,6 @@ struct Settings {
     full: Reach,
 }
 
-/// Metres within which a car is the reference's full model.
-const NEAR_CAR: f32 = 40.0;
-
 /// Seconds a frame may wait for the GPU to finish the frame before last, per refresh it is paced to, before the
 /// governor draws the levels of detail in.
 const BEHIND: f32 = 0.006;
@@ -505,41 +502,6 @@ impl Timing {
     }
 }
 
-/// A linear colour as sRGB: what multiplies a probed colour or a picture, which are sRGB.
-fn display(c: [f32; 3]) -> [f32; 3] {
-    c.map(|x| if x <= 0.0031308 { x * 12.92 } else { 1.055 * libm::powf(x, 1.0 / 2.4) - 0.055 })
-}
-
-/// The hour's light as the scene programs take it (`shaders/frame.cg`): `uFrame` (the shadow window's mapping is
-/// the caller's), `uLook`, and whether the rooms are lit.
-fn frame_light(p: &Preset, lamp_unit: f32, eye: V3, ahead: V3) -> (city::Frame, [f32; 12], city::Haze, bool) {
-    let k = 1.0 / city::LIGHT_SCALE;
-    // Street lamps and lit signs come on with the dusk (street-details.js: (glow - 0.36) × 1.15).
-    let glow = ((p.interior_glow - 0.36) * 1.15).clamp(0.0, 1.25);
-    let d = p.sun_dir;
-    let flat = libm::sqrtf(d[0] * d[0] + d[2] * d[2]).max(1e-4);
-    let (s, g) = (p.light_sky, p.light_ground);
-    let ih = 1.0 / p.fog_height.max(1.0);
-    // What a surface reflects of the sky: between just over the horizon and a third of the way up.
-    let env = [0, 1, 2].map(|k| (p.env_horizon[k] + p.env_up[k]) * 0.5);
-    #[rustfmt::skip]
-    let frame = [
-        d[0], d[1], d[2], p.fog_density,
-        s[0] * k, s[1] * k, s[2] * k, glow,
-        g[0] * k, g[1] * k, g[2] * k, p.interior_glow,
-        1.0, 0.0, 0.0, 0.0,
-        eye.x, eye.y, eye.z, p.road_wetness,
-        env[0], env[1], env[2], 0.0,
-    ];
-    let haze = city::Haze { colors: p.haze, sun: [d[0] / flat, d[2] / flat], eye, ahead, density: p.fog_density, thins: ih };
-    let sun = p.light_sun.map(|x| x * k);
-    // [2].x: the lamps' light, as a texel's full value stands for, as far as the lamps are on; at 0.55 of the pools
-    // the reference's cobra heads leave, which is where its sidewalks under a lamp show at midnight beside these
-    // (its ground darkens with the wet more than the probe's dry colours do).
-    let look = [p.tone[0], p.tone[1], p.tone[2], p.tone[3], sun[0], sun[1], sun[2], 0.0, lamp_unit * glow * k * 0.55, 0.0, 0.0, 0.0];
-    (frame, look, haze, p.interior_glow > 0.3)
-}
-
 fn main() {
     unsafe {
         // Development builds take boot switches from the USB share: {"msaa": 0 | 2 | 4, "title": false, "mode": "play",
@@ -614,22 +576,8 @@ fn main() {
         let load_ms = t_load.elapsed().as_millis() as u64;
         let pack_id: Value = std::fs::read(paths::PACK_CARD_ID).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or(Value::Null);
 
-        // The models of the traffic's kinds (ny_sim::traffic::Kind's order) and of the player's vehicles (Mode's).
-        let kinds = ["taxi", "sedan", "suv", "nypd", "bus"].map(|n| city.model(n));
-        // Near the eye the reference's full cars (it draws them within 90 m, CAR_PROXY_DISTANCE; 4 100 triangles each,
-        // so here within 40 m), past that the stand-ins above (500), both under the same pictures.
-        let kinds_near = ["taxi-near", "sedan-near", "suv-near", "nypd-near", "bus"].map(|n| city.model(n));
-        let player_models = [None, city.model("player-car"), city.model("player-cyclist"), city.model("player-helicopter")];
-        let rotors = [city.model("player-heli-rotor"), city.model("player-heli-tail")];
-        // The rotors' angles the frame before drew.
-        let mut rotors_shown = [0.0f32; 2];
-        // The people, posed by the export at eight points of their cycles.
-        let walk: Vec<Option<usize>> = (0..8).map(|k| city.model(&format!("person-walk-{k}"))).collect();
-        let run: Vec<Option<usize>> = (0..8).map(|k| city.model(&format!("person-run-{k}"))).collect();
-        let stand = city.model("person-stand");
-        let rider: Vec<Option<usize>> = (0..8).map(|k| city.model(&format!("rider-{k}"))).collect();
-        let mut crowd = crowd::Crowd::new(&city);
-        let mut gait = 0.0f32;
+        // What moves, as instances of the pack's models.
+        let mut movers = Movers::new(|name| city.model(name));
         let mut placed: Vec<(usize, ny_pack::Instance)> = Vec::with_capacity(city::MODEL_INSTANCES);
         let mut sun_tris = 0u32;
         let mut shown_late = false;
@@ -767,89 +715,12 @@ fn main() {
             fence.wait(slot);
             let waited = t2.elapsed();
             let tp = Instant::now();
-            // What moves: the traffic, and the player's vehicle.
+            // What moves: the traffic (cars in view within the middle distance, at most 450 m: past it a car is a few
+            // pixels), the sidewalks' people and the highway's cars, and the player.
             placed.clear();
-            if game.traffic_on && set.models {
-                // Cars in view and within the middle distance, at most 450 m (past it a car is a few pixels).
-                let planes = mat::planes(&vp);
-                let reach = set.show.reach.mid.clamp(250.0, 450.0);
-                for v in game.vehicles().iter().filter(|v| v.placed()) {
-                    let Some(far) = kinds[v.kind as usize] else { continue };
-                    let (dx, dz) = (v.x - eye.x, v.z - eye.z);
-                    if dx * dx + dz * dz > reach * reach || !ny_view::visible(&planes, [v.x - 7.0, -1.0, v.z - 7.0], [v.x + 7.0, 5.0, v.z + 7.0]) {
-                        continue;
-                    }
-                    let m = if dx * dx + dz * dz < NEAR_CAR * NEAR_CAR { kinds_near[v.kind as usize].unwrap_or(far) } else { far };
-                    // Paint is linear; it multiplies colours that are sRGB.
-                    let tint = display(v.paint);
-                    placed.push((m, city::placed(v.x, 0.0, v.z, v.yaw, v.pitch, v.roll, tint)));
-                }
-                // The sidewalks' people and the highway's cars
-                crowd.place(&game, eye, &planes, reach, &mut placed);
-            }
-            let pl = &game.players;
-            match game.mode {
-                ny_sim::Mode::Drive => {
-                    let c = &pl.car;
-                    if let Some(m) = player_models[1] {
-                        placed.push((m, city::placed(c.body.pos.x, c.body.pos.y + c.heave, c.body.pos.z, c.body.heading, c.pitch, c.roll, [1.0; 3])));
-                    }
-                }
-                ny_sim::Mode::Cycle => {
-                    let c = &pl.cyclist;
-                    let at = city::placed(c.body.pos.x, c.body.pos.y, c.body.pos.z, c.body.heading, 0.0, c.lean, [1.0; 3]);
-                    if let Some(m) = player_models[2] {
-                        placed.push((m, at));
-                    }
-                    let k = ((c.pedal_phase / core::f32::consts::TAU).rem_euclid(1.0) * 8.0) as usize % 8;
-                    if let Some(m) = rider[k] {
-                        placed.push((m, at));
-                    }
-                }
-                ny_sim::Mode::Fly => {
-                    let h = &pl.heli;
-                    let body = city::placed(h.body.pos.x, h.body.pos.y + h.bob, h.body.pos.z, h.body.heading, h.pitch, h.roll, [1.0; 3]);
-                    if let Some(m) = player_models[3] {
-                        placed.push((m, body));
-                    }
-                    // The rotors where they turn, and behind each blade, fading, where it passed since the frame
-                    // before: the main rotor turns 46° a frame at 30 frames a second, half the way to the next
-                    // blade, and its blades alone would seem to stand or turn back.
-                    use ny_sim::player::{MAIN_ROTOR_AT, TAIL_ROTOR_AT};
-                    const TRAIL: [u8; 8] = [255, 96, 72, 54, 40, 30, 22, 16];
-                    for (k, (angle, at, axis)) in [(h.main_rotor, MAIN_ROTOR_AT, 1), (h.tail_rotor, TAIL_ROTOR_AT, 0)].into_iter().enumerate() {
-                        let swept = (angle - rotors_shown[k]).clamp(0.0, core::f32::consts::FRAC_PI_2);
-                        rotors_shown[k] = angle;
-                        if let Some(m) = rotors[k] {
-                            for (i, alpha) in TRAIL.into_iter().enumerate() {
-                                placed.push((m, city::turned(&body, at, axis, angle - swept * i as f32 / TRAIL.len() as f32, alpha)));
-                            }
-                        }
-                    }
-                }
-                ny_sim::Mode::Walk => {
-                    // The gait cycle as the reference's rig keeps it: walking, its cadence grows with speed
-                    // (speed^0.43 / 1.22 cycles a second); running, one and a half cycles a second.
-                    let p = &pl.person;
-                    let speed = p.body.speed.abs();
-                    let running = speed > 3.0;
-                    gait = (gait + if running { 1.5 } else { libm::powf(speed.max(0.01), 0.43) / 1.22 } * dt).rem_euclid(1.0);
-                    let k = (gait * 8.0) as usize % 8;
-                    let m = if speed < 0.3 { stand } else if running { run[k] } else { walk[k] };
-                    if let Some(m) = m {
-                        placed.push((m, city::placed(p.body.pos.x, p.body.pos.y, p.body.pos.z, p.body.heading, 0.0, 0.0, [1.0; 3])));
-                    }
-                }
-            }
+            movers.place(&game, eye, &mat::planes(&vp), set.show.reach.mid.clamp(250.0, 450.0), dt, game.traffic_on && set.models, &mut placed);
             let hour_shown = game.hour.index();
-            // The sun's disc in its own colour, brighter than the sky round it (the moon's, dimmer).
-            let sun_disc = {
-                let c = preset.light_sun;
-                let top = c[0].max(c[1]).max(c[2]).max(1e-4);
-                let k = if preset.night > 0.5 { 0.55 } else { 1.6 };
-                let d = preset.sun_dir;
-                [d[0], d[1], d[2], 0.0, c[0] / top * k, c[1] / top * k, c[2] / top * k, 0.0]
-            };
+            let sun_disc = sun_disc(preset);
             // The world's step for this frame on its own thread while the frame draws; the game is the thread's until
             // the join below (what moves is drawn as it stood after the frame before's step).
             if let Some(w) = world_step {
@@ -871,11 +742,8 @@ fn main() {
                 sun_tris = 0;
             }
             smooth(&mut cpu_part[1], ts);
-            // What is bright in the frame on display glows over this one, as the reference's bloom does for the hour:
-            // its strength, and its threshold where the display shows it (under it, the hazy sky by the horizon would
-            // bloom and wash the frame out).
-            let glow_gain = preset.bloom[0] * 1.5;
-            let glow_threshold = preset.bloom[1].clamp(0.6, 0.95);
+            // What is bright in the frame on display glows over this one, as the reference's bloom does for the hour.
+            let (glow_gain, glow_threshold) = bloom(preset);
             if let Err(e) = if set.post { glow.run(ctx, glow_gain, glow_threshold, g::vita2d_get_current_fb(), 960) } else { Ok(()) } {
                 pocketjs_vita::vita_log(format_args!("newyork: {e}"));
             }
@@ -984,7 +852,7 @@ fn main() {
                     "cpuMs": {"draw": draw_ms, "sim": sim_ms, "interface": ui_ms, "interfaceDraw": ui_draw_ms, "joinWait": joined_ms, "horizon": horizon_ms, "place": cpu_part[0], "sunPass": cpu_part[1], "city": cpu_part[2], "models": cpu_part[3]},
                     "gpuMs": if set.profile { json!(gpu_ms) } else { Value::Null },
                     "city": {"draws": stats.draws, "tris": {"wall": stats.tris[0], "solid": stats.tris[1], "instanced": stats.tris[2], "sun": sun_tris}, "places": stats.places},
-                    "near": {"slots": [filled, slots], "reads": city.near.reads, "mb": city.near.bytes as f32 / 1e6, "starved": city.near.starved},
+                    "near": {"slots": [filled, slots], "reads": city.near.slots.reads, "mb": city.near.slots.bytes as f32 / 1e6, "starved": city.near.slots.starved},
                     "camera": {"pos": [eye.x, eye.y, eye.z], "target": [target.x, target.y, target.z], "fov": fov},
                     "game": {"player": r.mode.name(), "hour": game.hour.index(), "camera": game.camera, "mph": r.mph, "at": r.at, "label": game.label()},
                     "settings": {"near": set.show.reach.near, "mid": set.show.reach.mid, "detail": set.show.reach.detail, "profile": set.profile, "view": set.view.is_some()},

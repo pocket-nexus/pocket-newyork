@@ -15,8 +15,9 @@ use ny_view::{Item, Reach, Tables, RESIDENT};
 use vita2d_sys as g;
 
 use crate::gpu::{self, Blend, Cull, Gpu, Param, Program, Stream, Uniforms};
-use crate::mat::{self, Mat4};
 use crate::near::Near;
+use ny_frame::light::{AROUND, SHADOW_OUT, SHADOW_SOFT, SUN_BIAS};
+use ny_frame::mat::{self, Mat4};
 use crate::sunmap::SunMap;
 
 const FRAME: &str = include_str!("../shaders/frame.cg");
@@ -36,42 +37,7 @@ const SUN_F: &str = include_str!("../shaders/sun_f.cg");
 const BOX_F: &str = include_str!("../shaders/box_f.cg");
 const PICTURE_F: &str = include_str!("../shaders/picture_f.cg");
 
-/// Light reaches the fragments as a colour, which holds 0..1: it is carried divided by this.
-pub const LIGHT_SCALE: f32 = 2.0;
-/// What every scene program takes per frame (`uFrame`, `shaders/frame.cg`).
-pub type Frame = [f32; 24];
-
-/// The haze's colour by direction (the sky just over the horizon, as the display shows it): towards the sun,
-/// across from it and away from it, the sun's direction along the ground, and the eye and where it looks.
-pub struct Haze {
-    pub colors: [[f32; 3]; 3],
-    pub sun: [f32; 2],
-    pub eye: V3,
-    pub ahead: V3,
-    /// The haze per metre at the ground, and 1 / the height over which it thins by e.
-    pub density: f32,
-    pub thins: f32,
-}
-
-impl Haze {
-    /// The haze per metre between the eye and a point at height `y`: the mean of exp(−h / H) over the heights
-    /// between.
-    pub fn density_to(&self, y: f32) -> f32 {
-        let (a, b) = (y.max(0.0) * self.thins, self.eye.y.max(0.0) * self.thins);
-        let mean = if (b - a).abs() > 0.002 { (libm::expf(-a) - libm::expf(-b)) / (b - a) } else { libm::expf(-a) };
-        self.density * mean
-    }
-
-    /// The haze's colour towards `at`: a quadratic in the cosine of its angle along the ground to the sun's.
-    pub fn towards(&self, at: V3) -> [f32; 3] {
-        let (dx, dz) = (at.x - self.eye.x, at.z - self.eye.z);
-        let len = libm::sqrtf(dx * dx + dz * dz);
-        let (dx, dz) = if len > 1.0 { (dx / len, dz / len) } else { (self.ahead.x, self.ahead.z) };
-        let c = dx * self.sun[0] + dz * self.sun[1];
-        let [t, s, a] = self.colors;
-        [0, 1, 2].map(|k| s[k] + (t[k] - a[k]) * 0.5 * c + ((t[k] + a[k]) * 0.5 - s[k]) * c * c)
-    }
-}
+pub use ny_frame::light::{Frame, Haze, LIGHT_SCALE};
 /// Slots for cells' records (each as large as the largest record).
 const NEAR_SLOTS: usize = 72;
 /// Instances of models a frame may draw (every car of the traffic, and the player).
@@ -279,16 +245,13 @@ pub struct CityGpu {
 /// development build's boot switches add, for measurements.)
 pub fn scene_defines(shadow_unit: f32, extra: &str) -> String {
     format!(
-        "{extra}#define AROUND 0.5\n#define SUN_BIAS 0.0004\n#define UV_RANGE {:.1}\n#define LIGHT_SCALE {LIGHT_SCALE:.1}\n#define GLOW_RANGE {:.1}\n#define SHADOW_UNIT {shadow_unit:.3}\n#define SHADOW_K {:.3}\n#define SHADOW_OUT {SHADOW_OUT:.1}\n{FRAME}",
+        "{extra}#define AROUND {AROUND:.1}\n#define SUN_BIAS {SUN_BIAS:.4}\n#define UV_RANGE {:.1}\n#define LIGHT_SCALE {LIGHT_SCALE:.1}\n#define GLOW_RANGE {:.1}\n#define SHADOW_UNIT {shadow_unit:.3}\n#define SHADOW_K {:.3}\n#define SHADOW_OUT {SHADOW_OUT:.1}\n{FRAME}",
         pack::UV_RANGE,
         pack::GLOW_RANGE,
         1.0 / SHADOW_SOFT
     )
 }
 
-/// Metres under the shadow height over which the sun's light goes out, and how far out from a surface it reads.
-const SHADOW_SOFT: f32 = 2.5;
-const SHADOW_OUT: f32 = 2.5;
 
 const WALL_ATTRS: [(&str, u16, u32, u8); 5] = [("aPosition", 0, U16N, 3), ("aNormal", 6, S8N, 3), ("aAo", 9, U8N, 1), ("aUv", 10, S16N, 2), ("aTint", 14, U8N, 4)];
 const SOLID_ATTRS: [(&str, u16, u32, u8); 6] = [("aPosition", 0, U16N, 3), ("aNormal", 6, S8N, 3), ("aAo", 9, U8N, 1), ("aColor", 10, U8N, 4), ("aGlow", 14, U8N, 4), ("aGloss", 18, U8N, 2)];
@@ -415,48 +378,12 @@ impl CityGpu {
         g::sceGxmTextureSetMagFilter(&mut lamp, g::SceGxmTextureFilter_SCE_GXM_TEXTURE_FILTER_LINEAR);
         g::sceGxmTextureSetUAddrMode(&mut lamp, g::SceGxmTextureAddrMode_SCE_GXM_TEXTURE_ADDR_CLAMP);
         g::sceGxmTextureSetVAddrMode(&mut lamp, g::SceGxmTextureAddrMode_SCE_GXM_TEXTURE_ADDR_CLAMP);
-        let (sx, sz) = (1.0 / (head.w as f32 * head.step), 1.0 / (head.h as f32 * head.step));
-        let lamp_map = [sx, -head.x0 * sx, sz, -head.z0 * sz];
+        let lamp_map = ny_frame::lamps::mapping(&head);
         texture_bytes += texels;
-        // The lamps' light around a point, as the street and its storefronts hand it on: the pools averaged over
-        // 16 m cells, then twice over 5 × 5 of those (about 80 m), as the same square roots of a share of `unit`.
-        let decode = |v: u16| [((v >> 11) & 31) as f32 / 31.0, ((v >> 5) & 63) as f32 / 63.0, (v & 31) as f32 / 31.0].map(|s| s * s);
-        const D: u32 = 4;
-        let (cw, ch) = (head.w.div_ceil(D), head.h.div_ceil(D));
-        let mut coarse = vec![[0.0f32; 3]; (cw * ch) as usize];
-        for z in 0..head.h {
-            for x in 0..head.w {
-                let i = ((z * head.w + x) * 2 + 32) as usize;
-                let c = decode(u16::from_le_bytes([lamp_bytes[i], lamp_bytes[i + 1]]));
-                let o = &mut coarse[((z / D) * cw + x / D) as usize];
-                for k in 0..3 {
-                    o[k] += c[k] / (D * D) as f32;
-                }
-            }
-        }
-        for _ in 0..2 {
-            let src = coarse.clone();
-            for z in 0..ch as i32 {
-                for x in 0..cw as i32 {
-                    let mut s = [0.0f32; 3];
-                    for dz in -2..=2 {
-                        for dx in -2..=2 {
-                            let (xx, zz) = ((x + dx).clamp(0, cw as i32 - 1), (z + dz).clamp(0, ch as i32 - 1));
-                            let c = src[(zz as u32 * cw + xx as u32) as usize];
-                            for k in 0..3 {
-                                s[k] += c[k] / 25.0;
-                            }
-                        }
-                    }
-                    coarse[(z as u32 * cw + x as u32) as usize] = s;
-                }
-            }
-        }
+        // The lamps' light around a point, as the street and its storefronts hand it on (about 80 m).
+        let (cw, ch, coarse) = ny_frame::lamps::around(&head, &lamp_bytes[32..]);
         let around_at = vram.alloc((cw * ch * 2) as usize, 512)?.cast::<u16>();
-        for (i, c) in coarse.iter().enumerate() {
-            let q = |v: f32, max: f32| (v.clamp(0.0, 1.0).sqrt() * max).round() as u16;
-            *around_at.add(i) = q(c[0], 31.0) << 11 | q(c[1], 63.0) << 5 | q(c[2], 31.0);
-        }
+        core::ptr::copy_nonoverlapping(coarse.as_ptr(), around_at, coarse.len());
         let mut around: g::SceGxmTexture = core::mem::zeroed();
         if g::sceGxmTextureInitLinear(&mut around, around_at.cast(), g::SceGxmTextureFormat_SCE_GXM_TEXTURE_FORMAT_U5U6U5_RGB, cw, ch, 1) < 0 {
             return Err("lamp light around texture".into());
@@ -524,7 +451,7 @@ impl CityGpu {
     ///
     /// # Safety
     /// Inside a scene on `ctx`.
-    pub unsafe fn draw(&mut self, ctx: *mut g::SceGxmContext, vp: &Mat4, eye: V3, frame: &Frame, look: &[f32; 12], haze: &Haze, night: bool, shadow: &g::SceGxmTexture, sun: &SunMap, horizon: &crate::horizon::Horizon, show: &Show, frame_no: u32) -> Stats {
+    pub unsafe fn draw(&mut self, ctx: *mut g::SceGxmContext, vp: &Mat4, eye: V3, frame: &Frame, look: &[f32; 12], haze: &Haze, night: bool, shadow: &g::SceGxmTexture, sun: &SunMap, horizon: &ny_frame::horizon::Horizon, show: &Show, frame_no: u32) -> Stats {
         let planes = mat::planes(vp);
         let mut stats = Stats::default();
         let mut items = core::mem::take(&mut self.items);
@@ -892,37 +819,3 @@ pub struct ModelGroup {
     /// by its alpha, and casts no shadow.
     pub faded: bool,
 }
-
-/// An instance at `(x, y, z)` turned by yaw (about y), then pitch (about x), then roll (about z), as three.js's
-/// 'YXZ' order composes them, with `tint` (linear, 1 = as the model has it).
-pub fn placed(x: f32, y: f32, z: f32, yaw: f32, pitch: f32, roll: f32, tint: [f32; 3]) -> Instance {
-    let (sy, cy) = (libm::sinf(yaw), libm::cosf(yaw));
-    let (sp, cp) = (libm::sinf(pitch), libm::cosf(pitch));
-    let (sr, cr) = (libm::sinf(roll), libm::cosf(roll));
-    // R = Ry · Rx · Rz
-    let r = [
-        [cy * cr + sy * sp * sr, -cy * sr + sy * sp * cr, sy * cp],
-        [cp * sr, cp * cr, -sp],
-        [-sy * cr + cy * sp * sr, sy * sr + cy * sp * cr, cy * cp],
-    ];
-    let t = tint.map(|c| (c * 128.0).round().clamp(0.0, 255.0) as u8);
-    Instance { rows: [[r[0][0], r[0][1], r[0][2], x], [r[1][0], r[1][1], r[1][2], y], [r[2][0], r[2][1], r[2][2], z]], tint: [t[0], t[1], t[2], 255] }
-}
-
-/// A part of `base`'s model turned about its own pivot: at `at` in `base`'s frame, turned by `angle` about its x
-/// (`axis` 0) or its y (1), its tint `base`'s, `alpha` how much of it is drawn (under 255: seen through, the model's
-/// whole group with it).
-pub fn turned(base: &Instance, at: [f32; 3], axis: usize, angle: f32, alpha: u8) -> Instance {
-    let (s, c) = (libm::sinf(angle), libm::cosf(angle));
-    let local = if axis == 0 { [[1.0, 0.0, 0.0], [0.0, c, -s], [0.0, s, c]] } else { [[c, 0.0, s], [0.0, 1.0, 0.0], [-s, 0.0, c]] };
-    let mut rows = [[0.0f32; 4]; 3];
-    for (i, row) in rows.iter_mut().enumerate() {
-        let b = base.rows[i];
-        for j in 0..3 {
-            row[j] = b[0] * local[0][j] + b[1] * local[1][j] + b[2] * local[2][j];
-        }
-        row[3] = b[0] * at[0] + b[1] * at[1] + b[2] * at[2] + b[3];
-    }
-    Instance { rows, tint: [base.tint[0], base.tint[1], base.tint[2], alpha] }
-}
-
