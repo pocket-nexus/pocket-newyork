@@ -42,6 +42,9 @@ struct Draw {
     // The vertices' buffer (0: the pack's streams, 1: the cells' records, 2: this frame's models) and the word
     // they start at; the same for the instances.
     src: vec4<u32>,
+    // A crown of the cells': the eye, and the square of the distance within which a tree is drawn finer
+    // (`ny_frame::trees`), as a model (uCut in leaf_v.cg).
+    cut: vec4<f32>,
 }
 
 @group(0) @binding(0) var<uniform> frame: Frame;
@@ -177,6 +180,15 @@ fn instance(index: u32) -> Inst {
     i.tint = unpack4x8unorm(word(s, at + 12u));
     return i;
 }
+
+// Whether a crown of the cells' is a tree the frame draws finer: its crown's middle within the cut of the eye
+// (`ny_frame::trees::distance`); it folds to a point past the right of the frame (CUT).
+fn cut(i: Inst) -> bool {
+    let mid = vec3<f32>(i.r0.w, i.r1.w + 6.0 * i.r1.y, i.r2.w) - draw.cut.xyz;
+    return dot(mid, mid) < draw.cut.w;
+}
+
+const CUT: vec4<f32> = vec4<f32>(4.0, 4.0, 0.5, 1.0);
 
 fn local_of(pos: vec3<f32>) -> vec3<f32> {
     return pos * draw.span.xyz + draw.origin.xyz;
@@ -474,7 +486,7 @@ fn fs_ground(i: GroundOut) -> @location(0) vec4<f32> {
 struct LeafOut {
     @builtin(position) position: vec4<f32>,
     @location(0) uv: vec2<f32>,
-    @location(1) leaf: f32,
+    @location(1) leaf: vec3<f32>,
     @location(2) lamp: vec3<f32>,
     @location(3) light: vec4<f32>,
     @location(4) color: vec4<f32>,
@@ -488,24 +500,25 @@ fn vs_leaf(@builtin(vertex_index) index: u32, @builtin(instance_index) which: u3
     let world = placed(i, local_of(v.h.pos));
     let n = turned(i, v.h.normal);
     var o: LeafOut;
-    o.position = clip(world);
+    o.position = select(clip(world), CUT, cut(i));
     o.uv = v.uv * UV_RANGE;
     o.sun = sun_at(world);
-    // As the reference lights a card (TreeNodeMaterial): by the side the eye sees, the sun on it and a quarter of
-    // that through it from behind; the sky's light darkened deep in the crown, and its colour too.
-    let to = frame.f[4].xyz - world;
-    let seen = select(n, -n, dot(n, to) < 0.0);
-    let s = dot(seen, frame.f[0].xyz);
+    // As the reference lights a card (TreeNodeMaterial): by its crown's normal on both faces, the sky's light
+    // darkened deep in the crown, and its colour too; the sun shines on it and through it towards the eye
+    // (FoliageLightingModel; see leaf_v.cg).
     let ao = v.h.ao;
     let crown = saturate((ao - 0.55) * (1.0 / 0.45));
-    // The reference's crowns shadow themselves; here the sun reaches the outer leaves, and little of it the inner.
-    let reach = crown * crown * 0.8 + 0.2;
-    o.light = vec4<f32>(hemi(seen) * (ao * (crown * 0.75 + 0.25)), (max(s, 0.0) + max(-s, 0.0) * 0.25) * ao * reach);
+    let to = normalize(frame.f[4].xyz - world);
+    let scatter = normalize(frame.f[0].xyz + n * 0.3);
+    let through = pow(saturate(dot(to, -scatter)), 3.0) * (3.37 * (crown * 0.8 + 0.2)) * v.tint.a;
+    o.light = vec4<f32>(hemi(n) * (ao * (crown * 0.75 + 0.25)), max(dot(n, frame.f[0].xyz), 0.0) * ao);
     // A card takes the tree's tint over the picture; bark keeps its colour (alpha: which it is).
     o.color = vec4<f32>(saturate(mix(v.tint.rgb, i.tint.rgb * 2.0, v.tint.a)), haze_of(o.position.w));
     // (a lamp lights the crown from below and within)
     o.lamp = vec3<f32>(world.xz * frame.lamp_map.xz + frame.lamp_map.yw, saturate(1.4 - world.y * 0.1) * ao * 0.5);
-    o.leaf = v.tint.a;
+    // (y: past the sun's map, where the crowns do not shadow themselves, the sun reaches the outer leaves and little
+    // of it the inner)
+    o.leaf = vec3<f32>(v.tint.a, crown * crown * 0.8 + 0.2, through);
     return o;
 }
 
@@ -513,13 +526,13 @@ fn vs_leaf(@builtin(vertex_index) index: u32, @builtin(instance_index) which: u3
 fn fs_leaf(i: LeafOut) -> @location(0) vec4<f32> {
     let t = textureSample(pic_a, repeat, i.uv);
     // Bark reads white and opaque: its colour is its own.
-    let leaf = mix(vec4<f32>(1.0), t, i.leaf);
+    let leaf = mix(vec4<f32>(1.0), t, i.leaf.x);
     if (leaf.a < 0.5) {
         discard;
     }
-    // (a leaf reads the sun's map alone; past the map a tree is lit)
-    let lit = sun_lit(1.0, i.sun);
-    var light = i.light.rgb + frame.sun.rgb * (i.light.a * lit);
+    // (a leaf reads the sun's map alone; past the map the sun reaches into a crown as far as the vertex says)
+    let lit = sun_lit(1.0, i.sun) * mix(i.leaf.y, 1.0, i.sun.w);
+    var light = i.light.rgb + frame.sun.rgb * (lit * (i.light.a + vec3<f32>(1.0, 1.2, 0.45) * i.leaf.z));
     if (night()) {
         light += lamp_light(i.lamp.xy, i.lamp.z);
     }
@@ -668,8 +681,10 @@ struct SunLeafOut {
 @vertex
 fn vs_sun_leaf(@builtin(vertex_index) index: u32, @builtin(instance_index) which: u32) -> SunLeafOut {
     let v = wall_vertex(index);
+    let i = instance(which);
     var o: SunLeafOut;
-    o.position = vec4<f32>(placed(instance(which), local_of(v.h.pos)), 1.0) * frame.sun_draw;
+    // (a tree the frame draws finer casts its finer level's shadow)
+    o.position = select(vec4<f32>(placed(i, local_of(v.h.pos)), 1.0) * frame.sun_draw, CUT, cut(i));
     o.uv = vec3<f32>(v.uv * UV_RANGE, v.tint.a);
     return o;
 }

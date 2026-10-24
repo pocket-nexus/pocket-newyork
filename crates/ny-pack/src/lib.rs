@@ -128,7 +128,9 @@ pub mod kind {
     pub const OPEN_INST: u32 = 5;
     /// Trees: a crown of cards drawn at every `Instance`, `WallVertex` in the tree's own frame: `uv` in the
     /// leaves' picture (`tex`), `tint` the bark's colour with alpha 255 on a leaf card. Seen from both sides; a
-    /// card is cut where the picture's alpha is under a half.
+    /// card is cut where the picture's alpha is under a half. An instance's tint alpha is 255 less the tree's form
+    /// (0 or 1). The models `tree:<species>` (the crown the cells hold) and `tree:<species>:<form>:<level>` (levels
+    /// 0 and 1, finer) are the same trees nearer the eye.
     pub const LEAF_INST: u32 = 6;
     /// Surfaces under a picture of their own (a sign, a billboard): `WallVertex` with `uv` over the picture (`tex`,
     /// whose `metres` is the scale its texels stand over), `tint` alpha 255 where the reference does not light it.

@@ -14,6 +14,7 @@ void main(
     uniform float4 uBox[2],
     uniform float4 uFrame[6],
     uniform float4x4 uSunVp,
+    uniform float4 uCut,
 #ifdef NIGHT
     uniform float4 uLampMap,
     out float3 oLamp : TEXCOORD5,
@@ -25,31 +26,38 @@ void main(
     out float oHeight : TEXCOORD2,
     out float4 oLight : COLOR0,
     out float4 oColor : COLOR1,
-    out float oLeaf : TEXCOORD3)
+    out float3 oLeaf : TEXCOORD3)
 {
     float4 local = float4(aPosition * uBox[1].xyz + uBox[0].xyz, 1.0);
     float3 world = float3(dot(aRow0, local), dot(aRow1, local), dot(aRow2, local));
     oPosition = mul(uVp, float4(world, 1.0));
+    // A tree the frame draws finer (ny_frame::trees) is not drawn here: one whose crown's middle is within the cut
+    // of the eye (uCut: the eye, and the cut's square) folds to a point past the right of the frame.
+    float3 mid = float3(aRow0.w, aRow1.w + 6.0 * aRow1.y, aRow2.w) - uCut.xyz;
+    if (dot(mid, mid) < uCut.w)
+        oPosition = float4(4.0, 4.0, 0.5, 1.0);
     float3 n = normalize(float3(dot(aRow0.xyz, aNormal), dot(aRow1.xyz, aNormal), dot(aRow2.xyz, aNormal)));
     oUv = aUv * UV_RANGE;
     oMap = shadow_map(world, n, uFrame);
     oHeight = world.y;
     oSun = sun_at(world, uSunVp);
-    // As the reference lights a card (TreeNodeMaterial): by the side the eye sees, the sun on it and a quarter of
-    // that through it from behind; the sky's light darkened deep in the crown (its aoNode, crown × 0.75 + 0.25), and
-    // its colour too (crown × 0.45 + 0.55, which the vertex's ao is).
-    float3 to = uFrame[4].xyz - world;
-    float3 seen = dot(n, to) < 0.0 ? -n : n;
-    float s = dot(seen, uFrame[0].xyz);
+    // As the reference lights a card (TreeNodeMaterial): by its crown's normal on both faces, the sky's light
+    // darkened deep in the crown (its aoNode, crown × 0.75 + 0.25), and its colour too (crown × 0.45 + 0.55, which
+    // the vertex's ao is). The sun shines on it and through it towards the eye (FoliageLightingModel: the light's
+    // colour × translucencyNode × through; over the card's colour and the sun's light here, which is the light's
+    // over π, that is π × 1.5 / 1.4 (1, 1.2, 0.45) × (crown × 0.8 + 0.2), the colour the fragment's).
     float crown = saturate((aAo - 0.55) * (1.0 / 0.45));
-    // The reference's crowns shadow themselves; here the sun reaches the outer leaves, and little of it the inner.
-    float reach = crown * crown * 0.8 + 0.2;
-    oLight = float4(hemi(seen, uFrame) * (aAo * (crown * 0.75 + 0.25)), (max(s, 0.0) + max(-s, 0.0) * 0.25) * aAo * reach);
+    float3 to = normalize(uFrame[4].xyz - world);
+    float3 scatter = normalize(uFrame[0].xyz + n * 0.3);
+    float through = pow(saturate(dot(to, -scatter)), 3.0) * (3.37 * (crown * 0.8 + 0.2)) * aBark.a;
+    oLight = float4(hemi(n, uFrame) * (aAo * (crown * 0.75 + 0.25)), max(dot(n, uFrame[0].xyz), 0.0) * aAo);
     // A card takes the tree's tint over the picture; bark keeps its colour (alpha: which it is).
     oColor = float4(saturate(lerp(aBark.rgb, aTint.rgb * 2.0, aBark.a)), haze_of(world, oPosition.w, uFrame));
 #ifdef NIGHT
     // (a lamp lights the crown from below and within)
     oLamp = float3(world.xz * uLampMap.xz + uLampMap.yw, saturate(1.4 - world.y * 0.1) * aAo * 0.5);
 #endif
-    oLeaf = aBark.a;
+    // (y: past the sun's map, where the crowns do not shadow themselves, the sun reaches the outer leaves and little
+    // of it the inner)
+    oLeaf = float3(aBark.a, crown * crown * 0.8 + 0.2, through);
 }

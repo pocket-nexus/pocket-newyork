@@ -29,6 +29,7 @@ use city::{CityGpu, PackFile, Show};
 use gpu::Gpu;
 use ny_frame::light::{bloom, frame_light, sun_disc};
 use ny_frame::movers::Movers;
+use ny_frame::trees::Reach as TreeReach;
 use ny_frame::{horizon, mat};
 use ny_interface::{channel, pad, Mode, Pad, Session};
 use ny_pack::Preset;
@@ -343,6 +344,8 @@ struct Settings {
     govern: bool,
     /// The reaches when the budget allows them in full.
     full: Reach,
+    /// The trees drawn finer near the eye (`ny_frame::trees`).
+    trees: TreeReach,
 }
 
 /// Seconds a frame may wait for the GPU to finish the frame before last, per refresh it is paced to, before the
@@ -391,6 +394,10 @@ fn apply_control(v: &Value, s: &mut Settings, game: &mut Game, session: &mut Ses
     s.show.solids = flag("solids", s.show.solids);
     s.show.instances = flag("instances", s.show.instances);
     s.show.trees = num("trees", s.show.trees);
+    s.trees.fine = num("treeFine", s.trees.fine);
+    s.trees.fine_count = num("treeFineCount", s.trees.fine_count as f32) as usize;
+    s.trees.reach = num("treeReach", s.trees.reach);
+    s.trees.count = num("treeCount", s.trees.count as f32) as usize;
     // `near`, `mid` and `detail` set the reaches outright and stop the governor; `budget` hands them back to it.
     if v.get("near").is_some() || v.get("mid").is_some() || v.get("detail").is_some() || v.get("far").is_some() {
         s.show.reach.near = num("near", s.show.reach.near);
@@ -578,6 +585,8 @@ fn main() {
 
         // What moves, as instances of the pack's models.
         let mut movers = Movers::new(|name| city.model(name));
+        let mut trees = city.trees();
+        let mut fine_trees = 0usize;
         let mut placed: Vec<(usize, ny_pack::Instance)> = Vec::with_capacity(city::MODEL_INSTANCES);
         let mut sun_tris = 0u32;
         let mut shown_late = false;
@@ -619,6 +628,11 @@ fn main() {
             budget: 300_000,
             govern: true,
             full: Reach { detail: 160.0, near: 420.0, mid: 2400.0, far: 7000.0 },
+            // The reference draws its trees at level 0 within 105 m and level 1 within 420 m; here level 0 to the
+            // nearest ten within 35 m and level 1 to 200 in all within 200 m (a tree is some 1 500 triangles at
+            // level 0, 360 at level 1, 50 as the cells' crown). In Central Park at the golden hour the GPU took 51 ms
+            // a frame so, 61 with the crowns alone: their sparse cards cost less than the crowns' dense ones.
+            trees: TreeReach { fine: 35.0, fine_count: 10, reach: 200.0, count: 200 },
         };
         let mut scale = 1.0f32;
         let mut hold = 0u32;
@@ -718,7 +732,16 @@ fn main() {
             // What moves: the traffic (cars in view within the middle distance, at most 450 m: past it a car is a few
             // pixels), the sidewalks' people and the highway's cars, and the player.
             placed.clear();
-            movers.place(&game, eye, &mat::planes(&vp), set.show.reach.mid.clamp(250.0, 450.0), dt, game.traffic_on && set.models, &mut placed);
+            let planes = mat::planes(&vp);
+            movers.place(&game, eye, &planes, set.show.reach.mid.clamp(250.0, 450.0), dt, game.traffic_on && set.models, &mut placed);
+            // The trees nearest the eye, at the reference's finer levels.
+            let moving = placed.len();
+            if set.models && set.show.instances && set.show.trees > 0.0 {
+                city.place_trees(&mut trees, eye, &planes, &set.trees, &mut placed);
+            } else {
+                city.no_trees();
+            }
+            fine_trees = placed.len() - moving;
             let hour_shown = game.hour.index();
             let sun_disc = sun_disc(preset);
             // The world's step for this frame on its own thread while the frame draws; the game is the thread's until
@@ -852,6 +875,7 @@ fn main() {
                     "cpuMs": {"draw": draw_ms, "sim": sim_ms, "interface": ui_ms, "interfaceDraw": ui_draw_ms, "joinWait": joined_ms, "horizon": horizon_ms, "place": cpu_part[0], "sunPass": cpu_part[1], "city": cpu_part[2], "models": cpu_part[3]},
                     "gpuMs": if set.profile { json!(gpu_ms) } else { Value::Null },
                     "city": {"draws": stats.draws, "tris": {"wall": stats.tris[0], "solid": stats.tris[1], "instanced": stats.tris[2], "sun": sun_tris}, "places": stats.places},
+                    "trees": {"finer": fine_trees, "cut": city.cut_reach()},
                     "near": {"slots": [filled, slots], "reads": city.near.slots.reads, "mb": city.near.slots.bytes as f32 / 1e6, "starved": city.near.slots.starved},
                     "camera": {"pos": [eye.x, eye.y, eye.z], "target": [target.x, target.y, target.z], "fov": fov},
                     "game": {"player": r.mode.name(), "hour": game.hour.index(), "camera": game.camera, "mph": r.mph, "at": r.at, "label": game.label()},

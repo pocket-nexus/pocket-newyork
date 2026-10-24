@@ -1,13 +1,13 @@
 # Pocket New York in a browser tab
 
-The game of the PS Vita build, drawn with [wgpu](https://wgpu.rs) 25: over WebGPU in a tab (wasm32), and over
-Metal on the machine that builds it, where frames go to files. It reads **the PS Vita's pack** (`city.pack`,
-`cargo run --release -p ny-cook`) as it is: the same tables, records and pictures, in BC blocks where the adapter
-reads them. What moves is `crates/ny-sim`, the flow `crates/ny-interface`, what a frame draws `crates/ny-view` and
-what it works out on the processor `crates/ny-frame` (the hour's light, what moves as instances, what the street
-hides, the cells' records to read, the shadow window, the sun's map), as the PS Vita links them. The game's own
-interface (`ui/`, the bundle the PS Vita loads) runs over the city, and the page shows the game in a PS Vita's shell
-with its keys as the controls.
+The game of the PS Vita build, drawn with [wgpu](https://wgpu.rs) 25: over WebGPU in a tab (wasm32), and over Metal
+on the machine that builds it, where frames go to files. It reads **the PS Vita's pack** (`city.pack`, `cargo run
+--release -p ny-cook`) as it is: the same tables, records and pictures, in BC blocks where the adapter reads them.
+What moves is `crates/ny-sim`, the flow `crates/ny-interface`, what a frame draws `crates/ny-view` and what it works
+out on the processor `crates/ny-frame` (the hour's light, what moves as instances, the trees nearest the eye, what
+the street hides, the cells' records to read, the shadow window, the sun's map), as the PS Vita links them. The
+game's own interface (`ui/`, the bundle the PS Vita loads) runs over the city, and the page shows the game in a PS
+Vita's shell with its keys as the controls.
 
 | Part | What it is |
 | --- | --- |
@@ -52,6 +52,8 @@ frame's models) by `vertex_index` and `instance_index`, so no record is laid out
 
 - **Sixty frames a second at the PS Vita's full reaches**, with no governor (the PS Vita: thirty, with a governor that
   draws the reaches in).
+- **The trees nearer the eye at the reference's own reaches**: level 0 within 105 m (at most 128 trees), level 1
+  within 420 m (at most 900 in all); the PS Vita draws level 0 for ten trees within 35 m and level 1 within 200 m.
 - **Four samples a pixel** (the PS Vita: two); the pictures are filtered with anisotropy 4.
 - **The sun's map is 2 048²** over the same 320 m square (the PS Vita: 1 024²), read through a comparison sampler,
   which mixes four texels.
