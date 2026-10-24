@@ -113,7 +113,7 @@ impl Glow {
             b,
             bright: Pass::new(gpu, "bright", BRIGHT_F, ["uParams", ""], ["uSource", ""], 0, Blend::Opaque)?,
             blur: Pass::new(gpu, "blur", BLUR_F, ["", ""], ["uSource", ""], 0, Blend::Opaque)?,
-            glow: Pass::new(gpu, "glow", GLOW_F, ["uGlow", ""], ["uBloom", ""], msaa, Blend::Additive)?,
+            glow: Pass::new(gpu, "glow", GLOW_F, ["uGlow", ""], ["uBloom", ""], msaa, Blend::Premultiplied)?,
             lit: false,
         })
     }
