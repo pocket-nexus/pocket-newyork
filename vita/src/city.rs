@@ -717,7 +717,8 @@ impl CityGpu {
                 core::ptr::write_unaligned(buf.add(k * 52).cast::<Instance>(), p.1);
             }
             let r = &placed[at].1.rows;
-            out.push(ModelGroup { model: m, buf: buf.cast_const(), count: n as u32, at: V3 { x: r[0][3], y: r[1][3], z: r[2][3] } });
+            let faded = placed[at..end].iter().any(|p| p.1.tint[3] < 255);
+            out.push(ModelGroup { model: m, buf: buf.cast_const(), count: n as u32, at: V3 { x: r[0][3], y: r[1][3], z: r[2][3] }, faded });
             at = end;
         }
         out
@@ -736,10 +737,10 @@ impl CityGpu {
                 let model = self.models[group.model];
                 for bi in model.first..model.first + model.count {
                     let b = self.batches[bi as usize];
-                    if (b.veil != 0) != seen_through {
+                    if (b.veil != 0 || group.faded) != seen_through {
                         continue;
                     }
-                    let boxed = b.kind == kind::BOXED_INST;
+                    let boxed = b.kind == kind::BOXED_INST && !seen_through;
                     let pass = match (b.kind == kind::OPEN_INST, boxed, night) {
                         _ if seen_through => if night { &self.veil_night } else { &self.veil },
                         (_, true, true) => &self.boxed_night,
@@ -782,7 +783,7 @@ impl CityGpu {
                     l[9..12].copy_from_slice(&haze.towards(group.at));
                     let f = Uniforms::fragment(ctx);
                     f.set(pass.look, &l);
-                    f.set(pass.veil, &[b.veil as f32 / 255.0, 0.0, 0.0, 0.0]);
+                    f.set(pass.veil, &[if b.veil != 0 { b.veil as f32 / 255.0 } else { 1.0 }, 0.0, 0.0, 0.0]);
                     let mut fr = *frame;
                     fr[3] = haze.density_to(group.at.y);
                     v.set(pass.frame, &fr);
@@ -861,7 +862,7 @@ impl CityGpu {
         // What moves.
         self.sun_inst.prog.bind(ctx, false);
         gpu::state_opaque(ctx, Cull::None);
-        for group in groups {
+        for group in groups.iter().filter(|g| !g.faded) {
             let model = self.models[group.model];
             for bi in model.first..model.first + model.count {
                 let b = self.batches[bi as usize];
@@ -887,6 +888,9 @@ pub struct ModelGroup {
     pub buf: *const u8,
     pub count: u32,
     pub at: V3,
+    /// Whether an instance is seen through (its tint's alpha under 255): the group is drawn blended, each instance
+    /// by its alpha, and casts no shadow.
+    pub faded: bool,
 }
 
 /// An instance at `(x, y, z)` turned by yaw (about y), then pitch (about x), then roll (about z), as three.js's
@@ -904,3 +908,21 @@ pub fn placed(x: f32, y: f32, z: f32, yaw: f32, pitch: f32, roll: f32, tint: [f3
     let t = tint.map(|c| (c * 128.0).round().clamp(0.0, 255.0) as u8);
     Instance { rows: [[r[0][0], r[0][1], r[0][2], x], [r[1][0], r[1][1], r[1][2], y], [r[2][0], r[2][1], r[2][2], z]], tint: [t[0], t[1], t[2], 255] }
 }
+
+/// A part of `base`'s model turned about its own pivot: at `at` in `base`'s frame, turned by `angle` about its x
+/// (`axis` 0) or its y (1), its tint `base`'s, `alpha` how much of it is drawn (under 255: seen through, the model's
+/// whole group with it).
+pub fn turned(base: &Instance, at: [f32; 3], axis: usize, angle: f32, alpha: u8) -> Instance {
+    let (s, c) = (libm::sinf(angle), libm::cosf(angle));
+    let local = if axis == 0 { [[1.0, 0.0, 0.0], [0.0, c, -s], [0.0, s, c]] } else { [[c, 0.0, s], [0.0, 1.0, 0.0], [-s, 0.0, c]] };
+    let mut rows = [[0.0f32; 4]; 3];
+    for (i, row) in rows.iter_mut().enumerate() {
+        let b = base.rows[i];
+        for j in 0..3 {
+            row[j] = b[0] * local[0][j] + b[1] * local[1][j] + b[2] * local[2][j];
+        }
+        row[3] = b[0] * at[0] + b[1] * at[1] + b[2] * at[2] + b[3];
+    }
+    Instance { rows, tint: [base.tint[0], base.tint[1], base.tint[2], alpha] }
+}
+

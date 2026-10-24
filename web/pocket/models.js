@@ -4,7 +4,7 @@
 // with the wheels built in) for the taxi, the sedan and the SUV, the sedan with the NYPD light bar, and the bus with
 // its four wheels where placeWheels puts them. The player: the taxi, the bicycle and the helicopter as the
 // controllers built them (the groups PlayerTaxiCar, PlayerCyclist, PlayerHelicopter), each part in the group's
-// frame.
+// frame, but the helicopter's two rotors, each a model in the frame of the pivot it turns about.
 //
 // Every vertex is drawn twice through its material's colour graph, with white paint and with black paint
 // (`paintColor`), so the compiler knows how much of it is paint, and once through its emission graph by night.
@@ -54,7 +54,11 @@ function parts(app) {
     const geo = NYC.buildBusWheelGeo(side);
     for (const wz of [B.wheelZ, -B.wheelZ]) out.push({ model: 'bus', geo, mat: wheelMat, m: new THREE.Matrix4().makeTranslation(side * B.wheelX, B.wheelRadius, wz) });
   }
-  const heliBody = NYC.buildHelicopterBodyGeometry().attributes.position.count;
+  const count = (geo) => geo.attributes.position.count;
+  const heliBody = count(NYC.buildHelicopterBodyGeometry());
+  // The helicopter's rotors, models of their own in the frame of their pivots (mainRotorPivot, tailRotorPivot), which
+  // the runtime turns as the controllers do.
+  const rotors = new Map([[count(NYC.buildHelicopterMainRotorGeometry()), 'player-heli-rotor'], [count(NYC.buildHelicopterTailRotorGeometry()), 'player-heli-tail']]);
   // The player's vehicles, in the frame of their group.
   for (const [model, name] of [['player-car', 'PlayerTaxiCar'], ['player-cyclist', 'PlayerCyclist'], ['player-helicopter', 'PlayerHelicopter']]) {
     const root = app.scene.getObjectByName(name);
@@ -72,10 +76,55 @@ function parts(app) {
           : model === 'player-helicopter' && factory === 'createLoftedHelicopterMaterial' && o.geometry.attributes.position.count === heliBody
             ? 'player-helicopter'
             : undefined;
+      const rotor = model === 'player-helicopter' && factory === 'createLoftedHelicopterMaterial' ? rotors.get(count(o.geometry)) : undefined;
+      if (rotor) {
+        const pivot = inv.clone().multiply(o.parent.matrixWorld);
+        log(`  ${rotor}: pivot at ${new THREE.Vector3().setFromMatrixPosition(pivot).toArray().map((x) => x.toFixed(3))}`);
+        // (cut where the material's yellow tips begin and end, its radius 4.35 to 4.42 m on the main rotor and its
+        // height 0.65 to 0.68 m on the tail rotor: a blade has vertices at its ends alone, and a tip's colour there
+        // would run down the whole blade)
+        let geo = slice(o.geometry, (x, y, z) => Math.hypot(x, z), [4.35, 4.42]);
+        geo = slice(geo, (x, y, z) => Math.abs(y), [0.65, 0.68]);
+        out.push({ model: rotor, geo, mat, m: o.parent.matrixWorld.clone().invert().multiply(o.matrixWorld), name: o.name });
+        return;
+      }
       out.push({ model, geo: o.geometry, mat, m: inv.clone().multiply(o.matrixWorld), name: o.name, boxed });
     });
   }
   return out;
+}
+
+/** `geo` with its triangles cut where `f` (of a vertex's position) crosses each of `levels`, every attribute taken
+ *  along the cut edges. */
+function slice(geo, f, levels) {
+  let src = geo.index ? geo.toNonIndexed() : geo;
+  for (const level of levels) {
+    const names = Object.keys(src.attributes).filter((k) => !src.attributes[k].isInstancedBufferAttribute);
+    const attrs = names.map((k) => src.attributes[k]);
+    const pos = src.attributes.position;
+    const out = names.map(() => []);
+    const vertex = (i) => attrs.map((a) => Array.from({ length: a.itemSize }, (_, c) => a.getComponent(i, c)));
+    const mix = (a, b, t) => a.map((v, k) => v.map((x, c) => x + (b[k][c] - x) * t));
+    const push = (...vs) => vs.forEach((v) => v.forEach((x, k) => out[k].push(...x)));
+    for (let t = 0; t < pos.count; t += 3) {
+      const v = [vertex(t), vertex(t + 1), vertex(t + 2)];
+      const d = [0, 1, 2].map((k) => f(pos.getX(t + k), pos.getY(t + k), pos.getZ(t + k)) - level);
+      // The corner alone on its side of the level, if any.
+      const lone = [0, 1, 2].find((k) => d[k] > 0 !== d[(k + 1) % 3] > 0 && d[k] > 0 !== d[(k + 2) % 3] > 0);
+      if (lone === undefined) {
+        push(...v);
+        continue;
+      }
+      const [a, b, c] = [lone, (lone + 1) % 3, (lone + 2) % 3];
+      const ab = mix(v[a], v[b], d[a] / (d[a] - d[b]));
+      const ac = mix(v[a], v[c], d[a] / (d[a] - d[c]));
+      push(v[a], ab, ac, ab, v[b], v[c], ab, v[c], ac);
+    }
+    const next = new THREE.BufferGeometry();
+    names.forEach((k, i) => next.setAttribute(k, new THREE.BufferAttribute(new Float32Array(out[i]), attrs[i].itemSize)));
+    src = next;
+  }
+  return src;
 }
 
 /** The views of a boxed model, in the atlas's cells (two across, four down, 512 × 256 each): the axis looked along

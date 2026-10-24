@@ -7,7 +7,7 @@ uniform sampler2D uAround;
 // See frame.cg
 uniform float4 uLook[3];
 #ifdef VEIL
-// x: how opaque the part is
+// x: how opaque the part is (and each instance by its tint's alpha, in vGlow.a)
 uniform float4 uVeil;
 #endif
 
@@ -24,7 +24,7 @@ half4 main(float4 vSun : TEXCOORD6, float2 vMap : TEXCOORD1, float vHeight : TEX
 #endif
     half3 c = vColor.rgb * vColor.rgb * light * ((half)LIGHT_SCALE * vSpec.a) + vSpec.rgb + vGlow.rgb;
 #ifdef VEIL
-    return half4(shown(c, vColor.a, uLook), (half)uVeil.x);
+    return half4(shown(c, vColor.a, uLook), (half)uVeil.x * vGlow.a);
 #else
     return half4(shown(c, vColor.a, uLook), 1.0);
 #endif

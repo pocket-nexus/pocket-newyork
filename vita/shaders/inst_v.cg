@@ -45,7 +45,8 @@ void main(
     float paint = saturate(aColor.a * 1.004);
     oColor = float4(saturate(aColor.rgb * lerp(float3(1.0, 1.0, 1.0), aTint.rgb * 2.0, paint)), haze_of(world, oPosition.w, uFrame));
     float on = lerp(uFrame[1].w, 1.0, step(0.998, aColor.a));
-    oGlow = float4(aGlow.rgb * (aGlow.a * GLOW_RANGE * on), 0.0);
+    // (a: how much of the instance is drawn, for a part seen through)
+    oGlow = float4(aGlow.rgb * (aGlow.a * GLOW_RANGE * on), aTint.a);
     oSpec = reflection(world, n, aGloss, uFrame);
 #ifdef NIGHT
     oLamp = float3(world.xz * uLampMap.xz + uLampMap.yw, saturate(1.2 - world.y * 0.1));

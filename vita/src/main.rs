@@ -620,6 +620,9 @@ fn main() {
         // so here within 40 m), past that the stand-ins above (500), both under the same pictures.
         let kinds_near = ["taxi-near", "sedan-near", "suv-near", "nypd-near", "bus"].map(|n| city.model(n));
         let player_models = [None, city.model("player-car"), city.model("player-cyclist"), city.model("player-helicopter")];
+        let rotors = [city.model("player-heli-rotor"), city.model("player-heli-tail")];
+        // The rotors' angles the frame before drew.
+        let mut rotors_shown = [0.0f32; 2];
         // The people, posed by the export at eight points of their cycles.
         let walk: Vec<Option<usize>> = (0..8).map(|k| city.model(&format!("person-walk-{k}"))).collect();
         let run: Vec<Option<usize>> = (0..8).map(|k| city.model(&format!("person-run-{k}"))).collect();
@@ -805,8 +808,23 @@ fn main() {
                 }
                 ny_sim::Mode::Fly => {
                     let h = &pl.heli;
+                    let body = city::placed(h.body.pos.x, h.body.pos.y + h.bob, h.body.pos.z, h.body.heading, h.pitch, h.roll, [1.0; 3]);
                     if let Some(m) = player_models[3] {
-                        placed.push((m, city::placed(h.body.pos.x, h.body.pos.y + h.bob, h.body.pos.z, h.body.heading, h.pitch, h.roll, [1.0; 3])));
+                        placed.push((m, body));
+                    }
+                    // The rotors where they turn, and behind each blade, fading, where it passed since the frame
+                    // before: the main rotor turns 46° a frame at 30 frames a second, half the way to the next
+                    // blade, and its blades alone would seem to stand or turn back.
+                    use ny_sim::player::{MAIN_ROTOR_AT, TAIL_ROTOR_AT};
+                    const TRAIL: [u8; 5] = [255, 120, 70, 40, 20];
+                    for (k, (angle, at, axis)) in [(h.main_rotor, MAIN_ROTOR_AT, 1), (h.tail_rotor, TAIL_ROTOR_AT, 0)].into_iter().enumerate() {
+                        let swept = (angle - rotors_shown[k]).clamp(0.0, core::f32::consts::FRAC_PI_2);
+                        rotors_shown[k] = angle;
+                        if let Some(m) = rotors[k] {
+                            for (i, alpha) in TRAIL.into_iter().enumerate() {
+                                placed.push((m, city::turned(&body, at, axis, angle - swept * i as f32 / TRAIL.len() as f32, alpha)));
+                            }
+                        }
                     }
                 }
                 ny_sim::Mode::Walk => {

@@ -71,6 +71,13 @@ pub struct Cyclist {
     pub wheel: f32,
 }
 
+/// Where the helicopter's rotors turn in its frame (`mainRotorPivot` about its y, `tailRotorPivot` about its x), and
+/// how fast, in radians a second.
+pub const MAIN_ROTOR_AT: [f32; 3] = [0.0, 2.66, -0.35];
+pub const TAIL_ROTOR_AT: [f32; 3] = [0.18, 2.02, -5.62];
+pub const MAIN_ROTOR_SPEED: f32 = 24.0;
+pub const TAIL_ROTOR_SPEED: f32 = 32.0;
+
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Heli {
     pub body: Body,
@@ -133,8 +140,8 @@ impl Players {
 
     /// `update(dt, elapsed)`: the rotors turn, the active entity moves, the idle pedestrian strolls.
     pub fn update(&mut self, world: &World, dt: f32, elapsed: f32) {
-        self.heli.main_rotor += dt * 24.0;
-        self.heli.tail_rotor += dt * 32.0;
+        self.heli.main_rotor += dt * MAIN_ROTOR_SPEED;
+        self.heli.tail_rotor += dt * TAIL_ROTOR_SPEED;
         if self.active == Mode::Walk {
             self.update_person(world, dt);
         } else {
