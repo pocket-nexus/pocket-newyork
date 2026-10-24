@@ -816,7 +816,7 @@ fn main() {
                     // before: the main rotor turns 46° a frame at 30 frames a second, half the way to the next
                     // blade, and its blades alone would seem to stand or turn back.
                     use ny_sim::player::{MAIN_ROTOR_AT, TAIL_ROTOR_AT};
-                    const TRAIL: [u8; 5] = [255, 120, 70, 40, 20];
+                    const TRAIL: [u8; 8] = [255, 96, 72, 54, 40, 30, 22, 16];
                     for (k, (angle, at, axis)) in [(h.main_rotor, MAIN_ROTOR_AT, 1), (h.tail_rotor, TAIL_ROTOR_AT, 0)].into_iter().enumerate() {
                         let swept = (angle - rotors_shown[k]).clamp(0.0, core::f32::consts::FRAC_PI_2);
                         rotors_shown[k] = angle;
